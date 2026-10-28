@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  app.rc -- ресурсы приложения: значок окна/трея и сведения о версии.
+//  app.rc -- ресурсы: значок окна/трея и сведения о файле.
 // ---------------------------------------------------------------------------
 #include <windows.h>
 
@@ -18,12 +18,11 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "CompanyName",      "БГУИР, кафедра ЭВМ"
-            VALUE "FileDescription",  "Система видеонаблюдения (ЛР №4, вариант А5)"
+            VALUE "FileDescription",  "Video surveillance system (Lab 4, variant A5)"
             VALUE "FileVersion",      "1.0.0.0"
-            VALUE "InternalName",     "CameraLab4"
-            VALUE "OriginalFilename", "CameraLab4.exe"
-            VALUE "ProductName",      "CameraLab4"
+            VALUE "InternalName",     "Lab4_Camera"
+            VALUE "OriginalFilename", "Lab4_Camera.exe"
+            VALUE "ProductName",      "Lab4_Camera"
             VALUE "ProductVersion",   "1.0.0.0"
         END
     END
