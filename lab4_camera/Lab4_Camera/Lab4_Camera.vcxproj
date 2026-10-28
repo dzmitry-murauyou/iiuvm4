@@ -122,7 +122,11 @@ if exist "$(OpenCvDir)\x64\vc16\bin\*.dll" copy /Y "$(OpenCvDir)\x64\vc16\bin\*.
   </ItemDefinitionGroup>
 
   <ItemGroup>
+    <ClInclude Include="visual.h" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="visual.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />
