@@ -1,0 +1,18 @@
+# Артефакты сборки
+build/
+build-*/
+out/
+bin/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Временные файлы IDE
+.vs/
+*.user
+*.suo
+CMakeCache.txt
+CMakeFiles/

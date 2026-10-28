@@ -1,0 +1,34 @@
+// ---------------------------------------------------------------------------
+//  app.rc -- ресурсы приложения: значок окна/трея и сведения о версии.
+// ---------------------------------------------------------------------------
+#include <windows.h>
+
+101 ICON "app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION     1,0,0,0
+    PRODUCTVERSION  1,0,0,0
+    FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+    FILEFLAGS       0x0L
+    FILEOS          VOS_NT_WINDOWS32
+    FILETYPE        VFT_APP
+    FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "БГУИР, кафедра ЭВМ"
+            VALUE "FileDescription",  "Система видеонаблюдения (ЛР №4, вариант А5)"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "CameraLab4"
+            VALUE "OriginalFilename", "CameraLab4.exe"
+            VALUE "ProductName",      "CameraLab4"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
