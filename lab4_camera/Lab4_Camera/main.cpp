@@ -562,12 +562,11 @@ const wchar_t* kResTitles[] = {L"1920 × 1080", L"1280 × 720", L"1024 × 768",
 const int kResW[] = {1920, 1280, 1024, 960, 800, 640};
 const int kResH[] = {1080, 720, 768, 540, 600, 480};
 
-// Горячие клавиши. Основные — одиночные «=» и «-» (без модификаторов),
-// резервные — привычные Ctrl+Shift+… на случай конфликта с другой программой.
-const UINT kSnapshotKey = VK_OEM_PLUS;    // клавиша «=»
-const UINT kTrayKey = VK_OEM_MINUS;       // клавиша «-»
+// Снимок можно сделать двумя одиночными клавишами — «=» и «-» (без модификаторов),
+// плюс резервная комбинация Ctrl+Shift+F12. Трей живёт только на кнопке.
+const UINT kSnapshotKey1 = VK_OEM_PLUS;    // «=»
+const UINT kSnapshotKey2 = VK_OEM_MINUS;   // «-»
 const UINT kSnapshotMods = 0;
-const UINT kTrayMods = 0;
 
 const wchar_t* kFpsTitles[] = {L"30", L"25", L"20", L"15", L"10"};
 const double kFpsValues[] = {30.0, 25.0, 20.0, 15.0, 10.0};
@@ -586,10 +585,9 @@ public:
     };
 
     enum : int {
-        HK_SNAPSHOT_KEY = 1,   // «=»
-        HK_TRAY_KEY,           // «-»
+        HK_SNAPSHOT_KEY1 = 1,  // «=»
+        HK_SNAPSHOT_KEY2,      // «-»
         HK_SNAPSHOT_ALT,       // Ctrl+Shift+F12
-        HK_TRAY_ALT,           // Ctrl+Shift+T
     };
 
     enum : int {
@@ -791,21 +789,22 @@ private:
 
         camera_.SetNotifyWindow(hwnd_);
         AddTrayIcon();
-        // Основные клавиши: «=» — снимок, «-» — свернуть в трей / вернуть окно.
-        key_snapshot_ok_ = RegisterHotKey(hwnd_, HK_SNAPSHOT_KEY, kSnapshotMods, kSnapshotKey) != FALSE;
-        key_tray_ok_ = RegisterHotKey(hwnd_, HK_TRAY_KEY, kTrayMods, kTrayKey) != FALSE;
-        // Резервные комбинации — на случай, если одиночные клавиши заняты.
+        // Снимок: «=» и «-» (любая из двух), резерв — Ctrl+Shift+F12.
+        key1_ok_ = RegisterHotKey(hwnd_, HK_SNAPSHOT_KEY1, kSnapshotMods, kSnapshotKey1) != FALSE;
+        key2_ok_ = RegisterHotKey(hwnd_, HK_SNAPSHOT_KEY2, kSnapshotMods, kSnapshotKey2) != FALSE;
         hotkey_ok_ = RegisterHotKey(hwnd_, HK_SNAPSHOT_ALT, MOD_CONTROL | MOD_SHIFT, VK_F12) != FALSE;
-        tray_hotkey_ok_ = RegisterHotKey(hwnd_, HK_TRAY_ALT, MOD_CONTROL | MOD_SHIFT, 'T') != FALSE;
         SetTimer(hwnd_, 1, 500, nullptr);
 
         AddLog(LogLevel::Info, L"Приложение запущено");
-        AddLog(LogLevel::Info, key_snapshot_ok_
+        AddLog(LogLevel::Info, key1_ok_
                                    ? L"Клавиша «=» — снимок в фоне (работает из любого окна)"
-                                   : L"Клавиша «=» занята другим приложением, снимок: Ctrl+Shift+F12");
-        AddLog(LogLevel::Info, key_tray_ok_
-                                   ? L"Клавиша «-» — свернуть в трей / вернуть окно"
-                                   : L"Клавиша «-» занята другим приложением, трей: Ctrl+Shift+T");
+                                   : L"Клавиша «=» занята другим приложением");
+        AddLog(LogLevel::Info, key2_ok_
+                                   ? L"Клавиша «-» — снимок в фоне (то же действие)"
+                                   : L"Клавиша «-» занята другим приложением");
+        AddLog(LogLevel::Info, hotkey_ok_
+                                   ? L"Резерв: Ctrl+Shift+F12 — снимок в фоне"
+                                   : L"Ctrl+Shift+F12 занята другим приложением");
 
         RefreshDevices(true);
         Layout();
@@ -1086,7 +1085,7 @@ private:
 
         RECT hint{panel_rc_.left + S(18), panel_rc_.bottom - S(24), panel_rc_.right - S(18),
                   panel_rc_.bottom - S(8)};
-        TextG(g, L"«=» — снимок · «-» — свернуть в трей", hint, f_label_, ui::Dim);
+        TextG(g, L"Снимок: «=» или «-» · трей — кнопкой ниже", hint, f_label_, ui::Dim);
     }
 
     void DrawSave(Graphics& g) {
@@ -1397,7 +1396,7 @@ private:
         data.hIcon = (HICON)LoadImageW(inst_, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0,
                                        LR_DEFAULTSIZE | LR_SHARED);
         if (!data.hIcon) data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        wcscpy_s(data.szTip, L"Видеонаблюдение — ЛР №4 («=» — снимок, «-» — трей)");
+        wcscpy_s(data.szTip, L"Видеонаблюдение — ЛР №4 (снимок: «=» или «-»)");
         tray_added_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
     }
 
@@ -1412,8 +1411,8 @@ private:
         AddLog(LogLevel::Background,
                L"Окно свёрнуто в трей — работает фоновое фотонаблюдение (Ctrl+Shift+F12)");
         Balloon(L"Фотонаблюдение включено",
-                L"Окно скрыто. «=» — снимок без открытия окна.\n"
-                L"«-» или двойной щелчок по значку — вернуть окно.",
+                L"Окно скрыто. «=» или «-» — снимок без открытия окна.\n"
+                L"Двойной щелчок по значку вернёт окно.",
                 NIIF_INFO);
     }
 
@@ -1429,22 +1428,13 @@ private:
     }
 
     void OnHotkey(int id) {
-        if (id == HK_TRAY_KEY || id == HK_TRAY_ALT) {
-            // «-» — свернуть в трей, повторное нажатие возвращает окно.
-            if (hidden_) {
-                Restore();
-            } else {
-                AddLog(LogLevel::Background, L"Горячая клавиша «-» (свернуть в трей)");
-                HideToTray();
-            }
-            return;
-        }
-
-        // «=» и Ctrl+Shift+F12 — снимок, в том числе при скрытом окне.
+        // Все зарегистрированные клавиши делают одно и то же — снимок,
+        // в том числе при скрытом в трее окне.
         if (hidden_) {
-            AddLog(LogLevel::Background, id == HK_SNAPSHOT_KEY
-                                             ? L"Горячая клавиша «=» (скрытый режим)"
-                                             : L"Горячая клавиша Ctrl+Shift+F12 (скрытый режим)");
+            const wchar_t* name = id == HK_SNAPSHOT_KEY1 ? L"«=»"
+                                : id == HK_SNAPSHOT_KEY2 ? L"«-»"
+                                                         : L"Ctrl+Shift+F12";
+            AddLog(LogLevel::Background, std::wstring(L"Горячая клавиша ") + name + L" (скрытый режим)");
         }
         TakeSnapshot(true);
     }
@@ -1584,10 +1574,10 @@ private:
         cleaned_ = true;
 
         KillTimer(hwnd_, 1);
-        for (int id : {HK_SNAPSHOT_KEY, HK_TRAY_KEY, HK_SNAPSHOT_ALT, HK_TRAY_ALT}) {
+        for (int id : {HK_SNAPSHOT_KEY1, HK_SNAPSHOT_KEY2, HK_SNAPSHOT_ALT}) {
             UnregisterHotKey(hwnd_, id);
         }
-        key_snapshot_ok_ = key_tray_ok_ = hotkey_ok_ = tray_hotkey_ok_ = false;
+        key1_ok_ = key2_ok_ = hotkey_ok_ = false;
         camera_.Stop();
 
         if (tray_added_) {
@@ -1643,10 +1633,9 @@ private:
     int snapshot_count_ = 0;
 
     bool tray_added_ = false;
-    bool key_snapshot_ok_ = false;   // «=»
-    bool key_tray_ok_ = false;       // «-»
-    bool hotkey_ok_ = false;         // Ctrl+Shift+F12
-    bool tray_hotkey_ok_ = false;    // Ctrl+Shift+T
+    bool key1_ok_ = false;    // «=»
+    bool key2_ok_ = false;    // «-»
+    bool hotkey_ok_ = false;  // Ctrl+Shift+F12
     bool hidden_ = false;
 };
 
