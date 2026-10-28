@@ -18,7 +18,7 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "FileDescription",  "Video surveillance system (Lab 4, variant A5)"
+            VALUE "FileDescription",  "Photo monitoring (Lab 4)"
             VALUE "FileVersion",      "1.0.0.0"
             VALUE "InternalName",     "Lab4_Camera"
             VALUE "OriginalFilename", "Lab4_Camera.exe"

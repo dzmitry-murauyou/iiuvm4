@@ -1,16 +1,16 @@
 // ===========================================================================
-//  Лабораторная работа №4. Система видеонаблюдения на базе веб-камеры
-//  Вариант А5. Скрытый режим фотонаблюдения
+//  Лабораторная работа №4. Фотонаблюдение с веб-камеры
 //
 //  Проект разделён на два модуля:
-//    main.cpp    — логика: камера, файлы, журнал, трей, горячие клавиши;
+//    main.cpp    — логика: камера, запись, файлы, журнал, трей, горячие клавиши;
 //    visual.cpp  — визуал: тема, шрифты, раскладка и отрисовка окна
 //                  (интерфейс между модулями — visual.h).
 //
-//  Что умеет (только фотонаблюдение, как в задании):
+//  Что умеет:
 //    * предпросмотр с веб-камеры в реальном времени;
 //    * снимок JPEG — кнопкой и глобальным нажатием «-» и «=» одновременно;
-//    * скрытый режим: окно в трей, снимок без окна, всплывающие уведомления;
+//    * запись видео в AVI — кнопки «Начать запись» / «Остановить запись»;
+//    * скрытый режим: окно в трей, снимок без окна, уведомления в окне и в трее;
 //    * журнал событий и выгрузка отчёта.
 // ===========================================================================
 
@@ -179,6 +179,15 @@ std::wstring SnapshotPath(const std::wstring& dir) {
     return candidate;
 }
 
+std::wstring VideoPath(const std::wstring& dir) {
+    const std::wstring base = JoinPath(dir, L"video_" + FileStamp());
+    std::wstring candidate = base + L".avi";
+    for (int i = 1; FileExists(candidate); ++i) {
+        candidate = base + L"_" + std::to_wstring(i) + L".avi";
+    }
+    return candidate;
+}
+
 bool ImwriteAny(const std::wstring& path, const Mat& image, int quality) {
     const std::vector<int> params{cv::IMWRITE_JPEG_QUALITY, std::clamp(quality, 1, 100)};
     try {
@@ -270,11 +279,10 @@ public:
     }
 
     void Stop() {
-        if (!running_.exchange(false)) {
-            if (worker_.joinable()) worker_.join();
-            return;
-        }
+        running_.store(false);
         if (worker_.joinable()) worker_.join();
+        if (writer_.isOpened()) writer_.release();
+        recording_.store(false);
         state_ = CamState::Off;
         std::lock_guard<std::mutex> lock(mutex_);
         latest_ = Frame{};
@@ -286,6 +294,25 @@ public:
         out = latest_;
         return true;
     }
+
+    // --- запись видео (функционал базового монитора) ---
+    bool StartRecording(const std::wstring& path, double fps) {
+        if (state_.load() != CamState::On) return false;
+        std::lock_guard<std::mutex> lock(record_mutex_);
+        record_path_ = path;
+        record_fps_ = fps > 1.0 ? fps : 25.0;
+        record_start_.store(true);
+        record_stop_.store(false);
+        return true;
+    }
+
+    void StopRecording() {
+        std::lock_guard<std::mutex> lock(record_mutex_);
+        record_stop_.store(true);
+        recording_.store(false);   // интерфейс обновляется сразу, файл закроет поток
+    }
+
+    bool Recording() const { return recording_.load(); }
 
     // Ждёт кадр до timeout_ms. Нужно, чтобы снимок сразу после «Подключить»
     // не падал с ошибкой «нет видеосигнала», пока камера ещё разгоняется.
@@ -398,6 +425,31 @@ private:
             }
             frame_cv_.notify_all();
 
+            // --- запись видео: файл открывается здесь, в потоке захвата ---
+            {
+                bool start = false, stop = false;
+                std::wstring path;
+                double fps = 25.0;
+                {
+                    std::lock_guard<std::mutex> lock(record_mutex_);
+                    start = record_start_.exchange(false);
+                    stop = record_stop_.exchange(false);
+                    path = record_path_;
+                    fps = record_fps_;
+                }
+                if (stop && writer_.isOpened()) {
+                    writer_.release();
+                    recording_.store(false);
+                }
+                if (start) {
+                    if (writer_.isOpened()) writer_.release();
+                    writer_.open(ToUtf8(path), cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps,
+                                 cv::Size(frame.cols, frame.rows));
+                    recording_.store(writer_.isOpened());
+                }
+                if (writer_.isOpened()) writer_.write(frame);
+            }
+
             ++fps_frames;
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - fps_start);
@@ -430,6 +482,15 @@ private:
     std::atomic<CamState> state_{CamState::Off};
     mutable std::condition_variable frame_cv_;
 
+    // запись видео
+    std::mutex record_mutex_;
+    std::wstring record_path_;
+    double record_fps_ = 25.0;
+    std::atomic<bool> record_start_{false};
+    std::atomic<bool> record_stop_{false};
+    std::atomic<bool> recording_{false};
+    cv::VideoWriter writer_;   // трогает только поток захвата
+
     mutable std::mutex mutex_;
     Frame latest_;
     std::wstring format_;
@@ -450,6 +511,7 @@ const int kResH[] = {1080, 720, 768, 540, 600, 480};
 
 // Частота кадров задаётся фиксированно: в интерфейсе лишняя настройка не нужна.
 const double kCaptureFps = 30.0;
+const double kRecordFps = 25.0;    // частота записи видео
 
 // Снимок — одновременное нажатие «-» и «=». RegisterHotKey такую пару
 // (две обычные клавиши) зарегистрировать не может, поэтому состояние клавиш
@@ -468,6 +530,7 @@ public:
     enum : UINT {
         TIMER_INFO = 1,    // обновление счётчиков
         TIMER_CHORD = 2,   // опрос пары клавиш «-» + «=»
+        TIMER_TOAST = 3,   // гашение всплывающих уведомлений
     };
 
     enum : int {
@@ -498,7 +561,7 @@ public:
         wc.lpszClassName = kClassName;
         if (!RegisterClassExW(&wc)) return false;
 
-        hwnd_ = CreateWindowExW(0, kClassName, L"Система видеонаблюдения",
+        hwnd_ = CreateWindowExW(0, kClassName, L"Фотонаблюдение",
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT,
                                 CW_USEDEFAULT, S(1160), S(800), nullptr, nullptr, inst_, this);
         if (!hwnd_) return false;
@@ -692,9 +755,6 @@ private:
         SetTimer(hwnd_, TIMER_CHORD, kChordPollMs, nullptr);
 
         AddLog(0, L"Приложение запущено");
-        AddLog(0, L"Снимок — нажать «-» и «=» одновременно (работает из любого окна)");
-        AddLog(0, alt_hotkey_ok_ ? L"Вторая комбинация: Ctrl+Shift+F12 — тоже снимок (в том числе в трее)"
-                                 : L"Ctrl+Shift+F12 занята другим приложением");
 
         RefreshDevices(true);
         view_.Layout();
@@ -744,11 +804,11 @@ private:
         if (!devices_.empty()) {
             SendMessageW(combo, CB_SETCURSEL, 0, 0);
             if (!initial) {
-                AddLog(0, Format(L"Список камер обновлён: найдено %d", (int)devices_.size()));
+                Notify(Format(L"Найдено камер: %d", (int)devices_.size()), 0);
             }
         } else {
             SendMessageW(combo, CB_SETCURSEL, (WPARAM)-1, 0);
-            AddLog(1, L"Камеры не найдены: проверьте подключение и доступ к камере в Windows");
+            Notify(L"Камеры не найдены — проверьте подключение и доступ в Windows", 1);
         }
 
         UpdateModel();
@@ -774,7 +834,7 @@ private:
     void Disconnect() {
         camera_.Stop();
         status_text_ = L"Камера не подключена";
-        AddLog(0, L"Захват остановлен");
+        AddLog(0, L"Камера отключена");
         UpdateModel();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -785,8 +845,9 @@ private:
             case CamState::On:      AddLog(0, text); break;
             case CamState::Failed:  AddLog(2, text); break;
             case CamState::Opening: AddLog(0, text); break;
-            case CamState::Off:     AddLog(1, text); break;
+            case CamState::Off:     break;   // штатное отключение уже записано выше
         }
+        if (state == CamState::Failed) Notify(text, 2);
         UpdateModel();
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
@@ -805,7 +866,7 @@ private:
             dir = DefaultSaveDir();
             EnsureDir(dir);
             SetWindowTextW(view_.DirectoryEdit(), dir.c_str());
-            AddLog(2, L"Не удалось создать каталог, выбран каталог по умолчанию");
+            Notify(L"Не удалось создать каталог — выбран каталог по умолчанию", 2);
         }
         save_dir_ = dir;
     }
@@ -828,7 +889,7 @@ private:
                 default: break;
             }
             AddLog(1, L"Снимок не создан: " + reason);
-            Balloon(L"Снимок не создан", reason, NIIF_WARNING);
+            Notify(L"Снимок не создан: " + reason, 1);
             return;
         }
 
@@ -836,7 +897,7 @@ private:
         Mat mat(frame.height, frame.width, CV_8UC3, frame.bgr.data());
         if (!ImwriteAny(path, mat, 92)) {
             AddLog(2, L"Не удалось сохранить снимок: " + FileName(path));
-            Balloon(L"Ошибка", L"Не удалось сохранить снимок", NIIF_ERROR);
+            Notify(L"Не удалось сохранить снимок: " + FileName(path), 2);
             return;
         }
 
@@ -845,8 +906,9 @@ private:
         AddLog(background ? 3 : 0,
                Format(L"Снимок сохранён: %s (%d × %d, %.1f КБ)", FileName(path).c_str(),
                       frame.width, frame.height, (double)FileSize(path) / 1024.0));
-        Balloon(background ? L"Снимок (скрытый режим)" : L"Снимок сохранён",
-                FileName(path) + L"\n" + save_dir_, NIIF_INFO);
+        Notify(std::wstring(background ? L"Снимок (скрытый режим): " : L"Снимок сохранён: ") +
+                   FileName(path),
+               3);
         UpdateModel();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -856,7 +918,7 @@ private:
         const std::wstring path = JoinPath(save_dir_, L"report_" + FileStamp() + L".txt");
 
         std::wstring text;
-        text += L"ЛР №4. Система видеонаблюдения. Вариант А5 (скрытый режим фотонаблюдения)\r\n";
+        text += L"ЛР №4. Фотонаблюдение с веб-камеры (скрытый режим)\r\n";
         text += L"Отчёт сформирован: " + NowStamp(false) + L"\r\n";
         text += std::wstring(78, L'=') + L"\r\n\r\n";
         for (const auto& line : log_) text += line + L"\r\n";
@@ -875,8 +937,38 @@ private:
         WriteFile(h, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
         CloseHandle(h);
 
-        AddLog(0, L"Отчёт сохранён: " + FileName(path));
-        Balloon(L"Отчёт сохранён", FileName(path) + L"\n" + save_dir_, NIIF_INFO);
+        Notify(L"Отчёт сохранён: " + FileName(path), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Запись видео (функционал базового монитора)
+    // -----------------------------------------------------------------------
+    void StartRecording() {
+        if (camera_.State() != CamState::On) {
+            Notify(L"Запись не начата: камера не подключена", 1);
+            return;
+        }
+        ApplyDirectory();
+        const std::wstring path = VideoPath(save_dir_);
+        if (!camera_.StartRecording(path, kRecordFps)) {
+            Notify(L"Не удалось начать запись", 2);
+            return;
+        }
+        last_video_ = FileName(path);
+        model_.recording = true;
+        view_.SetEnabled(model_);
+        Notify(L"Запись начата: " + last_video_, 3);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void StopRecording() {
+        camera_.StopRecording();
+        model_.recording = false;
+        view_.SetEnabled(model_);
+        Notify(last_video_.empty() ? L"Запись остановлена"
+                                   : L"Запись остановлена: " + last_video_,
+               0);
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
     // -----------------------------------------------------------------------
@@ -892,19 +984,17 @@ private:
         data.hIcon = (HICON)LoadImageW(inst_, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0,
                                        LR_DEFAULTSIZE | LR_SHARED);
         if (!data.hIcon) data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        wcscpy_s(data.szTip, L"Видеонаблюдение — ЛР №4 (снимок: «-» и «=»)");
+        wcscpy_s(data.szTip, L"Фотонаблюдение (снимок: «-» и «=»)");
         tray_added_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
     }
 
     void HideToTray() {
         // Без открытой камеры фоновый снимок невозможен — подключаем автоматически.
         if (camera_.State() != CamState::On && !devices_.empty()) {
-            AddLog(3, L"Фоновый режим: подключаю камеру автоматически");
-            Connect();
+            Connect();   // без камеры фоновый снимок невозможен
         }
         ShowWindow(hwnd_, SW_HIDE);
         hidden_ = true;
-        AddLog(3, L"Окно свёрнуто в трей — работает фоновое фотонаблюдение");
         Balloon(L"Фотонаблюдение включено",
                 L"Окно скрыто. «-» и «=» одновременно — снимок без открытия окна.\n"
                 L"Двойной щелчок по значку вернёт окно.",
@@ -915,16 +1005,12 @@ private:
         ShowWindow(hwnd_, SW_SHOW);
         ShowWindow(hwnd_, SW_RESTORE);
         SetForegroundWindow(hwnd_);
-        if (hidden_) {
-            hidden_ = false;
-            AddLog(3, L"Окно восстановлено из трея");
-        }
+        hidden_ = false;
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
     // Снимок по резервной комбинации Ctrl+Shift+F12.
     void OnHotkey() {
-        if (hidden_) AddLog(3, L"Резервная комбинация Ctrl+Shift+F12 (скрытый режим)");
         TakeSnapshot(true);
     }
 
@@ -936,7 +1022,6 @@ private:
 
         if (both && !chord_down_) {
             chord_down_ = true;
-            if (hidden_) AddLog(3, L"Клавиши «-» и «=» (скрытый режим)");
             TakeSnapshot(true);
         } else if (!both) {
             chord_down_ = false;
@@ -967,6 +1052,18 @@ private:
             default:
                 break;
         }
+    }
+
+    // Короткое уведомление: в окне — всплывающая плашка (до трёх сразу),
+    // в скрытом режиме — balloon tip у значка в трее.
+    void Notify(const std::wstring& text, int level) {
+        if (hidden_) {
+            Balloon(L"Фотонаблюдение", text,
+                    level == 2 ? NIIF_ERROR : (level == 1 ? NIIF_WARNING : NIIF_INFO));
+            return;
+        }
+        view_.PushToast(text, level);
+        SetTimer(hwnd_, TIMER_TOAST, 80, nullptr);
     }
 
     void Balloon(const std::wstring& title, const std::wstring& text, DWORD flags) {
@@ -1005,6 +1102,12 @@ private:
             case ID_REPORT:
                 if (code == BN_CLICKED) SaveReport();
                 break;
+            case ID_RECORD_START:
+                if (code == BN_CLICKED) StartRecording();
+                break;
+            case ID_RECORD_STOP:
+                if (code == BN_CLICKED) StopRecording();
+                break;
             case ID_TRAY_BUTTON:
                 if (code == BN_CLICKED) HideToTray();
                 break;
@@ -1025,6 +1128,12 @@ private:
     void OnTimer(UINT id) {
         if (id == TIMER_CHORD) {
             PollChord();
+            return;
+        }
+        if (id == TIMER_TOAST) {
+            // Пока есть плашки — перерисовываем; когда все погасли, таймер не нужен.
+            if (!view_.ExpireToasts()) KillTimer(hwnd_, TIMER_TOAST);
+            InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
         if (id != TIMER_INFO) return;
@@ -1051,6 +1160,7 @@ private:
         model_.status = status_text_;
         model_.snapshot_count = snapshot_count_;
         model_.last_snapshot = last_snapshot_;
+        model_.recording = camera_.Recording();
         view_.SetEnabled(model_);
     }
 
@@ -1076,6 +1186,8 @@ private:
 
         KillTimer(hwnd_, TIMER_INFO);
         KillTimer(hwnd_, TIMER_CHORD);
+        KillTimer(hwnd_, TIMER_TOAST);
+        AddLog(0, L"Приложение закрыто");   // последняя запись журнала
         if (alt_hotkey_ok_) {
             UnregisterHotKey(hwnd_, HOTKEY_SNAPSHOT_ALT);
             alt_hotkey_ok_ = false;
@@ -1110,6 +1222,7 @@ private:
     std::wstring save_dir_;
     std::wstring status_text_ = L"Камера не подключена";
     std::wstring last_snapshot_;
+    std::wstring last_video_;
     int snapshot_count_ = 0;
 
     bool tray_added_ = false;

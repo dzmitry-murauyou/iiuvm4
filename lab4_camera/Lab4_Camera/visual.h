@@ -22,6 +22,7 @@
 #include <gdiplus.h>
 
 #include <string>
+#include <vector>
 
 namespace visual {
 
@@ -39,6 +40,8 @@ enum : int {
     ID_DIR,
     ID_BROWSE,
     ID_REPORT,
+    ID_RECORD_START,
+    ID_RECORD_STOP,
     ID_TRAY_BUTTON,
     ID_LOG,
 };
@@ -58,6 +61,7 @@ struct Model {
     std::wstring format;         // «MJPG»
     std::wstring last_snapshot;  // имя последнего файла
     int snapshot_count = 0;
+    bool recording = false;      // идёт запись видео
     bool has_devices = false;
     FrameView frame;
 };
@@ -91,6 +95,10 @@ public:
 
     void AddLogLine(const std::wstring& line, int level);
 
+    // Всплывающие уведомления внутри окна (короткие, до трёх одновременно).
+    void PushToast(const std::wstring& text, int level);
+    bool ExpireToasts();   // true, пока есть что показывать
+
     HBRUSH FieldBrush() const { return field_brush_; }
     RECT PreviewRect() const { return preview_rc_; }
 
@@ -110,6 +118,8 @@ private:
     void DrawSaveCard(Gdiplus::Graphics& g);
     void DrawLogCard(Gdiplus::Graphics& g);
 
+    void DrawToasts(Gdiplus::Graphics& g);
+
     void DrawButton(const DRAWITEMSTRUCT* item);
     void DrawCombo(const DRAWITEMSTRUCT* item);
     void DrawLogItem(const DRAWITEMSTRUCT* item);
@@ -121,6 +131,7 @@ private:
     HWND h_camera_ = nullptr, h_refresh_ = nullptr, h_res_ = nullptr;
     HWND h_connect_ = nullptr, h_disconnect_ = nullptr;
     HWND h_snapshot_ = nullptr, h_browse_ = nullptr, h_report_ = nullptr;
+    HWND h_record_start_ = nullptr, h_record_stop_ = nullptr;
     HWND h_tray_ = nullptr, h_dir_ = nullptr, h_log_ = nullptr;
     HBRUSH field_brush_ = nullptr;
 
@@ -137,6 +148,13 @@ private:
     RECT camera_label_{}, res_label_{};
     RECT dir_label_{}, dir_edit_rc_{};
     RECT last_title_rc_{}, last_value_rc_{}, hint_rc_{};
+
+    struct Toast {
+        std::wstring text;
+        int level = 0;
+        ULONGLONG until = 0;
+    };
+    std::vector<Toast> toasts_;   // новые — в конце
     RECT panel_head_{}, preview_head_{}, save_head_{}, log_head_{};
     int separator_y_ = 0;
     int info_top_ = 0;

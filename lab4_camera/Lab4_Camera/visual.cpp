@@ -43,9 +43,9 @@ const Color Preview(255, 8, 10, 16);
 
 const int Pad = 22;        // поля окна
 const int Gap = 12;        // между карточками
-const int HeaderH = 84;    // шапка
-const int LogH = 120;      // карточка журнала
-const int SaveH = 96;      // карточка «Фотонаблюдение»
+const int HeaderH = 92;    // шапка
+const int LogH = 110;      // карточка журнала
+const int SaveH = 140;     // карточка «Сохранение» (каталог, снимок, запись)
 const int PanelW = 352;    // карточка «Камера»
 const int RowH = 22;       // строка «подпись — значение»
 const int InnerPad = 16;   // поле внутри карточки
@@ -234,6 +234,8 @@ void View::CreateControls() {
     h_disconnect_ = Make(L"BUTTON", L"Отключить", BS_OWNERDRAW | WS_TABSTOP, ID_DISCONNECT);
     h_snapshot_ = Make(L"BUTTON", L"Снимок", BS_OWNERDRAW | WS_TABSTOP, ID_SNAPSHOT);
     h_report_ = Make(L"BUTTON", L"Сохранить отчёт", BS_OWNERDRAW | WS_TABSTOP, ID_REPORT);
+    h_record_start_ = Make(L"BUTTON", L"Начать запись", BS_OWNERDRAW | WS_TABSTOP, ID_RECORD_START);
+    h_record_stop_ = Make(L"BUTTON", L"Остановить запись", BS_OWNERDRAW | WS_TABSTOP, ID_RECORD_STOP);
     h_browse_ = Make(L"BUTTON", L"Обзор…", BS_OWNERDRAW | WS_TABSTOP, ID_BROWSE);
     h_tray_ = Make(L"BUTTON", L"Свернуть в трей", BS_OWNERDRAW | WS_TABSTOP, ID_TRAY_BUTTON);
 
@@ -266,16 +268,18 @@ void View::AddLogLine(const std::wstring& line, int level) {
     }
 }
 
-int View::MinWidth() const { return S(theme::Pad * 2 + 360 + theme::Gap + theme::PanelW) + S(24); }
+int View::MinWidth() const {
+    // заголовок + блок состояния + кнопка трея (292) + поля окна
+    return S(theme::Pad * 2 + 200 + 20 + 250 + 20 + 292) + S(60);
+}
 
 int View::MinHeight() const {
-    // Высота карточки «Камера»: до разделителя плюс три строки информации.
-    const int panel = S(42 + 20 + 26 + 10 + 20 + 26 + 12 + 32 + 12 + 1 + 12 + 3 * theme::RowH);
-    // + S(56) — запас, чтобы в карточке гарантированно поместились все строки,
-    // «последний снимок» и подсказка без наложений.
+    // Высота карточки «Камера»: до разделителя плюс две строки информации
+    // (остальные при нехватке места убираются адаптивной раскладкой).
+    const int panel = S(42 + 20 + 26 + 10 + 20 + 26 + 12 + 32 + 12 + 1 + 12 + 2 * theme::RowH);
     return S(theme::Pad * 2 + theme::HeaderH + theme::Gap + theme::SaveH + theme::Gap +
              theme::LogH) +
-           panel + S(56);
+           panel + S(30);
 }
 
 // ---------------------------------------------------------------------------
@@ -297,13 +301,14 @@ void View::Layout() {
     panel_rc_ = {w - pad - S(theme::PanelW), S(theme::HeaderH), w - pad, save_rc_.top - gap};
     preview_rc_ = {pad, S(theme::HeaderH), panel_rc_.left - gap, save_rc_.top - gap};
 
-    tray_rc_ = {w - pad - S(146), S(14), w - pad, S(14) + S(32)};
+    // Кнопка трея — вдвое крупнее прежней (292 × 64 DIP).
+    tray_rc_ = {w - pad - S(292), S(14), w - pad, S(14) + S(64)};
     SetWindowPos(h_tray_, nullptr, tray_rc_.left, tray_rc_.top, tray_rc_.right - tray_rc_.left,
                  tray_rc_.bottom - tray_rc_.top, SWP_NOZORDER);
 
     // --- шапка -------------------------------------------------------------
-    title_rc_ = {pad, S(11), w - pad, S(47)};
-    subtitle_rc_ = {pad, S(49), w - pad, S(71)};
+    title_rc_ = {pad, S(14), w - pad, S(50)};
+    subtitle_rc_ = {pad, S(52), w - pad, S(74)};
 
     // --- карточка «Предпросмотр» ------------------------------------------
     preview_head_ = {preview_rc_.left + p, preview_rc_.top + S(10), preview_rc_.right - p,
@@ -377,7 +382,7 @@ void View::Layout() {
                               : RECT{0, 0, 0, 0};
     }
 
-    // --- карточка «Фотонаблюдение» ----------------------------------------
+    // --- карточка «Сохранение» --------------------------------------------
     {
         const int left = save_rc_.left + p;
         const int right = save_rc_.right - p;
@@ -397,13 +402,22 @@ void View::Layout() {
         SetWindowPos(h_browse_, nullptr, edit_x + edit_w + S(8), y1,
                      std::max(S(60), (int)right - (edit_x + edit_w + S(8))), S(24), SWP_NOZORDER);
 
-        const int y2 = save_rc_.top + S(64);
         const int gap2 = S(10);
         const int avail_w = (int)(right - left) - gap2;
         const int w1 = std::max(S(110), avail_w * 32 / 100);
+
+        // ряд 1: снимок и отчёт
+        const int y2 = save_rc_.top + S(64);
         SetWindowPos(h_snapshot_, nullptr, left, y2, w1, S(28), SWP_NOZORDER);
         SetWindowPos(h_report_, nullptr, left + w1 + gap2, y2,
                      std::max(S(120), (int)right - (left + w1 + gap2)), S(28), SWP_NOZORDER);
+
+        // ряд 2: запись видео (функционал базового монитора)
+        const int y3 = save_rc_.top + S(100);
+        const int half_w = (avail_w) / 2;
+        SetWindowPos(h_record_start_, nullptr, left, y3, half_w, S(28), SWP_NOZORDER);
+        SetWindowPos(h_record_stop_, nullptr, left + half_w + gap2, y3,
+                     (int)right - (left + half_w + gap2), S(28), SWP_NOZORDER);
     }
 
     // --- карточка «Журнал» -------------------------------------------------
@@ -429,13 +443,15 @@ void View::SetEnabled(const Model& model) {
     EnableWindow(h_refresh_, (!on && !opening) ? TRUE : FALSE);
     EnableWindow(h_res_, (!on && !opening) ? TRUE : FALSE);
     EnableWindow(h_snapshot_, on ? TRUE : FALSE);
+    EnableWindow(h_record_start_, (on && !model.recording) ? TRUE : FALSE);
+    EnableWindow(h_record_stop_, model.recording ? TRUE : FALSE);
     EnableWindow(h_dir_, TRUE);
     EnableWindow(h_browse_, TRUE);
 
     // Owner-draw кнопки не перерисовываются сами при смене состояния —
     // иначе «Снимок» остаётся нарисованным в старом виде.
     for (HWND button : {h_connect_, h_disconnect_, h_refresh_, h_snapshot_, h_browse_, h_report_,
-                        h_tray_}) {
+                        h_record_start_, h_record_stop_, h_tray_}) {
         InvalidateRect(button, nullptr, FALSE);
     }
 }
@@ -463,6 +479,7 @@ void View::Paint(HDC dc, const RECT& client, const Model& model) {
     DrawPanel(g, model);
     DrawSaveCard(g);
     DrawLogCard(g);
+    DrawToasts(g);
 }
 
 void View::DrawHeader(Graphics& g, const Model& model) {
@@ -482,9 +499,8 @@ void View::DrawHeader(Graphics& g, const Model& model) {
     title_rc_ = {S(theme::Pad), S(11), text_right, S(47)};
     subtitle_rc_ = {S(theme::Pad), S(49), text_right, S(71)};
 
-    TextG(g, L"Система видеонаблюдения", title_rc_, f_title_, theme::Txt);
-    TextG(g, L"ЛР №4 · вариант А5 · скрытый режим фотонаблюдения", subtitle_rc_, f_label_,
-          theme::Sub);
+    TextG(g, L"Фотонаблюдение", title_rc_, f_title_, theme::Txt);
+    TextG(g, L"Снимки с камеры · скрытый режим работы", subtitle_rc_, f_label_, theme::Sub);
 
     const Color state = StateColor(model.camera_state);
     const int cy = (status_rc.top + status_rc.bottom) / 2;
@@ -593,7 +609,7 @@ void View::DrawSaveCard(Graphics& g) {
                     (REAL)(save_rc_.bottom - save_rc_.top)));
 
     Card(g, save_rc_);
-    TextG(g, L"Фотонаблюдение", save_head_, f_section_, theme::Txt);
+    TextG(g, L"Сохранение", save_head_, f_section_, theme::Txt);
     TextG(g, L"Каталог", dir_label_, f_label_, theme::Sub);
 
     // Рамка вокруг поля ввода: у EDIT нет своего оформления.
@@ -628,6 +644,64 @@ bool View::DrawItem(const DRAWITEMSTRUCT* item) {
         case ODT_LISTBOX:  DrawLogItem(item); return true;
         default:           return false;
     }
+}
+
+void View::PushToast(const std::wstring& text, int level) {
+    if (text.empty()) return;
+    if (toasts_.size() >= 3) toasts_.erase(toasts_.begin());   // старые уходят
+    toasts_.push_back({text, level, GetTickCount64() + 2600});
+}
+
+bool View::ExpireToasts() {
+    const ULONGLONG now = GetTickCount64();
+    toasts_.erase(std::remove_if(toasts_.begin(), toasts_.end(),
+                                 [now](const Toast& t) { return t.until <= now; }),
+                  toasts_.end());
+    return !toasts_.empty();
+}
+
+// Уведомления рисуются поверх предпросмотра, стопкой (до трёх сразу),
+// и плавно гаснут в последние 0,4 с — «коротко выскакивают», не мешая работе.
+void View::DrawToasts(Graphics& g) {
+    if (toasts_.empty()) return;
+
+    const ULONGLONG now = GetTickCount64();
+    g.SetClip(RectF((REAL)preview_rc_.left, (REAL)preview_rc_.top,
+                    (REAL)(preview_rc_.right - preview_rc_.left),
+                    (REAL)(preview_rc_.bottom - preview_rc_.top)));
+
+    const int right = preview_rc_.right - S(12);
+    int y = preview_rc_.top + S(12);
+
+    for (auto it = toasts_.rbegin(); it != toasts_.rend(); ++it) {
+        const ULONGLONG left = it->until > now ? it->until - now : 0;
+        const int alpha = left < 400 ? (int)(255 * left / 400) : 255;
+        if (alpha <= 4) break;
+
+        Color accent = theme::Line;
+        if (it->level == 1) accent = theme::Warn;
+        else if (it->level == 2) accent = theme::Bad;
+        else if (it->level == 3) accent = theme::Good;
+
+        const int w = std::min(S(430), TextWidth(g, it->text, f_value_) + S(40));
+        const int h = S(34);
+        RECT rc{right - w, y, right, y + h};
+
+        RoundedRect(g, rc, Color((BYTE)(235 * alpha / 255), 18, 26, 44),
+                    Color((BYTE)alpha, accent.GetR(), accent.GetG(), accent.GetB()),
+                    S(theme::Radius * 4) / 4.0f);
+
+        RECT bar{rc.left + S(8), rc.top + S(8), rc.left + S(12), rc.bottom - S(8)};
+        FillRectG(g, bar, Color((BYTE)alpha, accent.GetR(), accent.GetG(), accent.GetB()));
+
+        RECT text_rc{rc.left + S(20), rc.top, rc.right - S(10), rc.bottom};
+        TextG(g, it->text, text_rc, f_value_, Color((BYTE)alpha, 235, 240, 248));
+
+        y += h + S(6);
+        if (y > preview_rc_.bottom - h) break;   // больше не помещается
+    }
+
+    g.ResetClip();
 }
 
 void View::DrawButton(const DRAWITEMSTRUCT* item) {
