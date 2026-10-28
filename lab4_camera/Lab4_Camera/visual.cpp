@@ -229,10 +229,6 @@ void View::CreateControls() {
     h_res_ = Make(L"COMBOBOX", L"",
                   CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP,
                   ID_RES);
-    h_fps_ = Make(L"COMBOBOX", L"",
-                  CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP,
-                  ID_FPS);
-
     h_refresh_ = Make(L"BUTTON", L"Обновить", BS_OWNERDRAW | WS_TABSTOP, ID_REFRESH);
     h_connect_ = Make(L"BUTTON", L"Подключить", BS_OWNERDRAW | WS_TABSTOP, ID_CONNECT);
     h_disconnect_ = Make(L"BUTTON", L"Отключить", BS_OWNERDRAW | WS_TABSTOP, ID_DISCONNECT);
@@ -251,7 +247,7 @@ void View::CreateControls() {
 
 void View::ApplyFontsToControls() {
     if (!h_log_) return;
-    for (HWND combo : {h_camera_, h_res_, h_fps_}) {
+    for (HWND combo : {h_camera_, h_res_}) {
         SendMessageW(combo, CB_SETITEMHEIGHT, (WPARAM)-1, S(22));
         SendMessageW(combo, CB_SETITEMHEIGHT, (WPARAM)0, S(22));
     }
@@ -331,13 +327,10 @@ void View::Layout() {
         SetWindowPos(h_refresh_, nullptr, right - refresh_w, y, refresh_w, field_h, SWP_NOZORDER);
         y += field_h + S(10);
 
-        const int half = (right - left - S(10)) / 2;
-        res_label_ = {left, y, left + half, y + S(20)};
-        fps_label_ = {left + half + S(10), y, right, y + S(20)};
+        res_label_ = {left, y, right, y + S(20)};
         y += S(20);
 
-        SetWindowPos(h_res_, nullptr, left, y, half, S(240), SWP_NOZORDER);
-        SetWindowPos(h_fps_, nullptr, left + half + S(10), y, half, S(240), SWP_NOZORDER);
+        SetWindowPos(h_res_, nullptr, left, y, right - left, S(240), SWP_NOZORDER);
         y += field_h + S(12);
 
         const int btn_w = (right - left - S(10)) / 2;
@@ -435,7 +428,6 @@ void View::SetEnabled(const Model& model) {
     EnableWindow(h_camera_, (!on && !opening) ? TRUE : FALSE);
     EnableWindow(h_refresh_, (!on && !opening) ? TRUE : FALSE);
     EnableWindow(h_res_, (!on && !opening) ? TRUE : FALSE);
-    EnableWindow(h_fps_, (!on && !opening) ? TRUE : FALSE);
     EnableWindow(h_snapshot_, on ? TRUE : FALSE);
     EnableWindow(h_dir_, TRUE);
     EnableWindow(h_browse_, TRUE);
@@ -546,8 +538,15 @@ void View::DrawPreview(Graphics& g, const Model& model) {
             g.ReleaseHDC(vdc);
         }
     } else {
-        TextG(g, model.camera_state == CameraOpening ? L"Подключение камеры…" : L"Нет видеосигнала",
-              video, f_section_, theme::Dim, StringAlignmentCenter);
+        const wchar_t* text = L"Камера не подключена";
+        if (model.camera_state == CameraOpening) {
+            text = L"Подключение камеры…";
+        } else if (model.camera_state == CameraFailed) {
+            text = L"Камера недоступна";
+        } else if (model.camera_state == CameraOn) {
+            text = L"Ожидание кадра…";
+        }
+        TextG(g, text, video, f_section_, theme::Dim, StringAlignmentCenter);
     }
 
     g.ResetClip();
@@ -563,7 +562,6 @@ void View::DrawPanel(Graphics& g, const Model& model) {
 
     TextG(g, L"Устройство", camera_label_, f_label_, theme::Sub);
     TextG(g, L"Разрешение", res_label_, f_label_, theme::Sub);
-    TextG(g, L"Кадров/с", fps_label_, f_label_, theme::Sub);
 
     Separator(g, panel_rc_, separator_y_);
 

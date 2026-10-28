@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstring>
 #include <iterator>
@@ -258,6 +259,11 @@ public:
 
     void Start(int index, int width, int height, double fps) {
         Stop();
+        {
+            // Кадр прошлой сессии не должен считаться «текущим».
+            std::lock_guard<std::mutex> lock(mutex_);
+            latest_ = Frame{};
+        }
         running_.store(true);
         state_ = CamState::Opening;
         worker_ = std::thread(&Camera::Run, this, index, width, height, fps);
@@ -277,6 +283,18 @@ public:
     bool Latest(Frame& out) const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!latest_.ok()) return false;
+        out = latest_;
+        return true;
+    }
+
+    // Ждёт кадр до timeout_ms. Нужно, чтобы снимок сразу после «Подключить»
+    // не падал с ошибкой «нет видеосигнала», пока камера ещё разгоняется.
+    bool WaitForFrame(Frame& out, int timeout_ms) const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!frame_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                                [this] { return latest_.ok(); })) {
+            return false;
+        }
         out = latest_;
         return true;
     }
@@ -378,6 +396,7 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 latest_ = std::move(out);
             }
+            frame_cv_.notify_all();
 
             ++fps_frames;
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -409,6 +428,7 @@ private:
     std::thread worker_;
     std::atomic<bool> running_{false};
     std::atomic<CamState> state_{CamState::Off};
+    mutable std::condition_variable frame_cv_;
 
     mutable std::mutex mutex_;
     Frame latest_;
@@ -428,8 +448,8 @@ const wchar_t* kResTitles[] = {L"1920 × 1080", L"1280 × 720", L"1024 × 768",
 const int kResW[] = {1920, 1280, 1024, 960, 800, 640};
 const int kResH[] = {1080, 720, 768, 540, 600, 480};
 
-const wchar_t* kFpsTitles[] = {L"30", L"25", L"20", L"15", L"10"};
-const double kFpsValues[] = {30.0, 25.0, 20.0, 15.0, 10.0};
+// Частота кадров задаётся фиксированно: в интерфейсе лишняя настройка не нужна.
+const double kCaptureFps = 30.0;
 
 // Снимок — одновременное нажатие «-» и «=». RegisterHotKey такую пару
 // (две обычные клавиши) зарегистрировать не может, поэтому состояние клавиш
@@ -634,6 +654,13 @@ private:
     void Paint(HDC dc, const RECT& client) {
         // Кадр берём один раз за отрисовку: указатель живёт до конца Paint().
         if (camera_.Latest(paint_frame_)) {
+            has_frame_ = true;
+        } else if (camera_.State() != CamState::On) {
+            has_frame_ = false;   // камера остановлена — показываем заглушку
+        }
+        // Разовый пропуск кадра при работающей камере не должен превращаться
+        // в надпись «нет видеосигнала» — остаётся последний показанный кадр.
+        if (has_frame_) {
             model_.frame.bgr = paint_frame_.bgr.data();
             model_.frame.width = paint_frame_.width;
             model_.frame.height = paint_frame_.height;
@@ -649,11 +676,7 @@ private:
         for (const wchar_t* title : kResTitles) {
             SendMessageW(view_.ResolutionCombo(), CB_ADDSTRING, 0, (LPARAM)title);
         }
-        for (const wchar_t* title : kFpsTitles) {
-            SendMessageW(view_.FpsCombo(), CB_ADDSTRING, 0, (LPARAM)title);
-        }
         SendMessageW(view_.ResolutionCombo(), CB_SETCURSEL, 1, 0);
-        SendMessageW(view_.FpsCombo(), CB_SETCURSEL, 0, 0);
 
         save_dir_ = DefaultSaveDir();
         EnsureDir(save_dir_);
@@ -670,7 +693,7 @@ private:
 
         AddLog(0, L"Приложение запущено");
         AddLog(0, L"Снимок — нажать «-» и «=» одновременно (работает из любого окна)");
-        AddLog(0, alt_hotkey_ok_ ? L"Резервная комбинация Ctrl+Shift+F12 свободна"
+        AddLog(0, alt_hotkey_ok_ ? L"Вторая комбинация: Ctrl+Shift+F12 — тоже снимок (в том числе в трее)"
                                  : L"Ctrl+Shift+F12 занята другим приложением");
 
         RefreshDevices(true);
@@ -740,13 +763,10 @@ private:
         index = std::clamp(index, 0, (int)devices_.size() - 1);
         int res = (int)SendMessageW(view_.ResolutionCombo(), CB_GETCURSEL, 0, 0);
         res = std::clamp(res, 0, (int)std::size(kResTitles) - 1);
-        int fps = (int)SendMessageW(view_.FpsCombo(), CB_GETCURSEL, 0, 0);
-        fps = std::clamp(fps, 0, (int)std::size(kFpsValues) - 1);
-
         status_text_ = L"Подключение камеры…";
         AddLog(0, Format(L"Подключение «%s» (%s, %.0f к/с)", devices_[index].name.c_str(),
-                         kResTitles[res], kFpsValues[fps]));
-        camera_.Start(index, kResW[res], kResH[res], kFpsValues[fps]);
+                         kResTitles[res], kCaptureFps));
+        camera_.Start(index, kResW[res], kResH[res], kCaptureFps);
         UpdateModel();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -794,9 +814,21 @@ private:
         ApplyDirectory();
 
         Frame frame;
-        if (!camera_.Latest(frame)) {
-            AddLog(1, L"Снимок не создан: нет видеосигнала");
-            if (background) Balloon(L"Снимок не создан", L"Нет видеосигнала", NIIF_WARNING);
+        bool have = camera_.Latest(frame);
+        if (!have && (camera_.State() == CamState::On || camera_.State() == CamState::Opening)) {
+            // Даём камере шанс выдать первый кадр (сразу после «Подключить»).
+            have = camera_.WaitForFrame(frame, 1500);
+        }
+        if (!have) {
+            std::wstring reason = L"нет видеосигнала";
+            switch (camera_.State()) {
+                case CamState::Off:     reason = L"камера не подключена"; break;
+                case CamState::Opening: reason = L"камера не успела выдать кадр"; break;
+                case CamState::Failed:  reason = L"камера недоступна"; break;
+                default: break;
+            }
+            AddLog(1, L"Снимок не создан: " + reason);
+            Balloon(L"Снимок не создан", reason, NIIF_WARNING);
             return;
         }
 
@@ -1083,6 +1115,7 @@ private:
     bool tray_added_ = false;
     bool alt_hotkey_ok_ = false;
     bool chord_down_ = false;
+    bool has_frame_ = false;   // последний кадр можно показывать
     bool hidden_ = false;
 };
 

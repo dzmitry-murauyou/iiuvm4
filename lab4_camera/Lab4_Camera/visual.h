@@ -33,7 +33,6 @@ enum : int {
     ID_CAMERA = 1001,
     ID_REFRESH,
     ID_RES,
-    ID_FPS,
     ID_CONNECT,
     ID_DISCONNECT,
     ID_SNAPSHOT,
@@ -88,7 +87,6 @@ public:
     // Доступ к контролам для логики (чтение выбора, текста каталога и т.п.)
     HWND CameraCombo() const { return h_camera_; }
     HWND ResolutionCombo() const { return h_res_; }
-    HWND FpsCombo() const { return h_fps_; }
     HWND DirectoryEdit() const { return h_dir_; }
 
     void AddLogLine(const std::wstring& line, int level);
@@ -120,7 +118,7 @@ private:
     HINSTANCE inst_ = nullptr;
     bool created_ = false;
 
-    HWND h_camera_ = nullptr, h_refresh_ = nullptr, h_res_ = nullptr, h_fps_ = nullptr;
+    HWND h_camera_ = nullptr, h_refresh_ = nullptr, h_res_ = nullptr;
     HWND h_connect_ = nullptr, h_disconnect_ = nullptr;
     HWND h_snapshot_ = nullptr, h_browse_ = nullptr, h_report_ = nullptr;
     HWND h_tray_ = nullptr, h_dir_ = nullptr, h_log_ = nullptr;
@@ -136,7 +134,7 @@ private:
     // Геометрия карточек и элементов (в физических пикселях).
     RECT preview_rc_{}, panel_rc_{}, save_rc_{}, log_rc_{}, tray_rc_{};
     RECT title_rc_{}, subtitle_rc_{};
-    RECT camera_label_{}, res_label_{}, fps_label_{};
+    RECT camera_label_{}, res_label_{};
     RECT dir_label_{}, dir_edit_rc_{};
     RECT last_title_rc_{}, last_value_rc_{}, hint_rc_{};
     RECT panel_head_{}, preview_head_{}, save_head_{}, log_head_{};
