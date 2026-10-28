@@ -5,9 +5,6 @@
 
 101 ICON "app.ico"
 
-// Фон окна — тот же bg.jpg, что в ЛР №1 (читается в LoadBg()).
-201 RCDATA "bg.jpg"
-
 VS_VERSION_INFO VERSIONINFO
     FILEVERSION     1,0,0,0
     PRODUCTVERSION  1,0,0,0

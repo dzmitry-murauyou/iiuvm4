@@ -234,56 +234,14 @@ bool ImwriteAny(const std::wstring& path, const Mat& image, int quality) {
 //  3. Рисование в стиле ЛР №1 (аналог gfx.cpp)
 // ===========================================================================
 
-Bitmap* g_bg = nullptr;
-
-Bitmap* LoadBg(HINSTANCE inst) {
-    HRSRC res = FindResourceW(inst, MAKEINTRESOURCEW(201), RT_RCDATA);
-    if (!res) return nullptr;
-    const DWORD size = SizeofResource(inst, res);
-    if (!size) return nullptr;
-    HGLOBAL loaded = LoadResource(inst, res);
-    if (!loaded) return nullptr;
-    void* data = LockResource(loaded);
-    if (!data) return nullptr;
-
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, size);
-    if (!memory) return nullptr;
-    void* dst = GlobalLock(memory);
-    if (!dst) {
-        GlobalFree(memory);
-        return nullptr;
-    }
-    memcpy(dst, data, size);
-    GlobalUnlock(memory);
-
-    IStream* stream = nullptr;
-    if (CreateStreamOnHGlobal(memory, TRUE, &stream) != S_OK) {
-        GlobalFree(memory);
-        return nullptr;
-    }
-    Bitmap* bitmap = new Bitmap(stream);
-    stream->Release();
-    if (bitmap->GetLastStatus() != Ok) {
-        delete bitmap;
-        return nullptr;
-    }
-    return bitmap;
-}
-
-// Фон: картинка bg.jpg на весь экран + затемнение (как в ЛР №1).
+// Фон: просто тёмная заливка с очень мягким градиентом (без картинки).
 void PaintBg(Graphics& g, int w, int h) {
     SolidBrush base(ui::Bg);
     g.FillRectangle(&base, 0, 0, w, h);
-    if (g_bg) {
-        const REAL iw = (REAL)g_bg->GetWidth(), ih = (REAL)g_bg->GetHeight();
-        if (iw > 0 && ih > 0) {
-            const REAL s = std::max(w / iw, h / ih);
-            g.DrawImage(g_bg, (w - iw * s) / 2, (h - ih * s) / 2, iw * s, ih * s);
-        }
-    }
-    // Затемнение слабее, чем в ЛР1: у нового фона и так низкая контрастность.
-    SolidBrush dim(Color(110, 6, 10, 18));
-    g.FillRectangle(&dim, 0, 0, w, h);
+
+    LinearGradientBrush sheen(Point(0, 0), Point(0, h), Color(255, 26, 34, 54),
+                              Color(255, 8, 11, 20));
+    g.FillRectangle(&sheen, 0, 0, w, h);
 }
 
 void FillRectG(Graphics& g, const RECT& rc, const Color& color) {
@@ -740,7 +698,7 @@ private:
                 return 0;
 
             case WM_HOTKEY:
-                OnHotkey();
+                OnHotkey((int)wp);
                 return 0;
 
             case WM_DEVICECHANGE:
@@ -820,12 +778,17 @@ private:
         camera_.SetNotifyWindow(hwnd_);
         AddTrayIcon();
         hotkey_ok_ = RegisterHotKey(hwnd_, 1, MOD_CONTROL | MOD_SHIFT, VK_F12) != FALSE;
+        // Вторая комбинация — скрыть окно в трей / вернуть его.
+        tray_hotkey_ok_ = RegisterHotKey(hwnd_, 2, MOD_CONTROL | MOD_SHIFT, 'T') != FALSE;
         SetTimer(hwnd_, 1, 500, nullptr);
 
         AddLog(LogLevel::Info, L"Приложение запущено");
         AddLog(LogLevel::Info, hotkey_ok_
                                    ? L"Ctrl+Shift+F12 — снимок в фоне (работает из любого окна)"
                                    : L"Ctrl+Shift+F12 занята другим приложением");
+        AddLog(LogLevel::Info, tray_hotkey_ok_
+                                   ? L"Ctrl+Shift+T — свернуть в трей / вернуть окно"
+                                   : L"Ctrl+Shift+T занята другим приложением");
 
         RefreshDevices(true);
         Layout();
@@ -837,14 +800,15 @@ private:
             delete *font;
             *font = nullptr;
         }
+        // Один шрифт на всё приложение: Segoe UI, размеры кратны шагу 2 px,
+        // поэтому строки в карточках и журнале выглядят ровно.
         FontFamily family(L"Segoe UI");
-        FontFamily mono(L"Consolas");
-        f_title_ = new Font(&family, (REAL)S(25), FontStyleBold, UnitPixel);     // заголовок окна
-        f_section_ = new Font(&family, (REAL)S(17), FontStyleBold, UnitPixel);   // заголовок карточки
+        f_title_ = new Font(&family, (REAL)S(24), FontStyleBold, UnitPixel);     // заголовок окна
+        f_section_ = new Font(&family, (REAL)S(16), FontStyleBold, UnitPixel);   // заголовок карточки
         f_label_ = new Font(&family, (REAL)S(14), FontStyleRegular, UnitPixel);  // подпись
         f_value_ = new Font(&family, (REAL)S(14), FontStyleBold, UnitPixel);     // значение
         f_button_ = new Font(&family, (REAL)S(14), FontStyleBold, UnitPixel);    // текст кнопки
-        f_log_ = new Font(&mono, (REAL)S(13), FontStyleRegular, UnitPixel);      // журнал
+        f_log_ = new Font(&family, (REAL)S(14), FontStyleRegular, UnitPixel);    // журнал
     }
 
     void ApplyFontsToControls() {
@@ -1010,8 +974,7 @@ private:
         TextG(g, kTitle, title_rc, f_title_, ui::Txt);
 
         RECT sub_rc{S(ui::Pad), S(52), tray_rc_.left - S(24), S(76)};
-        TextG(g, L"Лабораторная работа №4 · вариант А5 · скрытый режим фотонаблюдения", sub_rc,
-              f_label_, ui::Sub);
+        TextG(g, L"ЛР №4 · вариант А5 · скрытый режим фотонаблюдения", sub_rc, f_label_, ui::Sub);
 
         Color state_color = ui::Dim;
         if (camera_.State() == CamState::On) state_color = ui::Good;
@@ -1103,7 +1066,7 @@ private:
 
         RECT hint{panel_rc_.left + S(18), panel_rc_.bottom - S(24), panel_rc_.right - S(18),
                   panel_rc_.bottom - S(8)};
-        TextG(g, L"Скрытый режим: «Свернуть в трей» + Ctrl+Shift+F12", hint, f_label_, ui::Dim);
+        TextG(g, L"Ctrl+Shift+F12 — снимок · Ctrl+Shift+T — трей", hint, f_label_, ui::Dim);
     }
 
     void DrawSave(Graphics& g) {
@@ -1414,7 +1377,7 @@ private:
         data.hIcon = (HICON)LoadImageW(inst_, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0,
                                        LR_DEFAULTSIZE | LR_SHARED);
         if (!data.hIcon) data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        wcscpy_s(data.szTip, L"Видеонаблюдение — ЛР №4, вариант А5");
+        wcscpy_s(data.szTip, L"Видеонаблюдение — ЛР №4 (Ctrl+Shift+F12 — снимок)");
         tray_added_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
     }
 
@@ -1430,7 +1393,7 @@ private:
                L"Окно свёрнуто в трей — работает фоновое фотонаблюдение (Ctrl+Shift+F12)");
         Balloon(L"Фотонаблюдение включено",
                 L"Окно скрыто. Ctrl+Shift+F12 — снимок без открытия окна.\n"
-                L"Двойной щелчок по значку вернёт окно.",
+                L"Ctrl+Shift+T или двойной щелчок по значку — вернуть окно.",
                 NIIF_INFO);
     }
 
@@ -1445,7 +1408,17 @@ private:
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
-    void OnHotkey() {
+    void OnHotkey(int id) {
+        if (id == 2) {
+            // Ctrl+Shift+T — свернуть в трей или вернуть окно.
+            if (hidden_) {
+                Restore();
+            } else {
+                AddLog(LogLevel::Background, L"Горячая клавиша Ctrl+Shift+T (свернуть в трей)");
+                HideToTray();
+            }
+            return;
+        }
         if (hidden_) AddLog(LogLevel::Background, L"Горячая клавиша Ctrl+Shift+F12 (скрытый режим)");
         TakeSnapshot(true);
     }
@@ -1589,6 +1562,10 @@ private:
             UnregisterHotKey(hwnd_, 1);
             hotkey_ok_ = false;
         }
+        if (tray_hotkey_ok_) {
+            UnregisterHotKey(hwnd_, 2);
+            tray_hotkey_ok_ = false;
+        }
         camera_.Stop();
 
         if (tray_added_) {
@@ -1645,6 +1622,7 @@ private:
 
     bool tray_added_ = false;
     bool hotkey_ok_ = false;
+    bool tray_hotkey_ok_ = false;
     bool hidden_ = false;
 };
 
@@ -1688,7 +1666,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
 
     int result = 0;
     {
-        g_bg = LoadBg(inst);
         App app;
         if (!app.Init(inst, show)) {
             MessageBoxW(nullptr, L"Не удалось создать окно приложения.", L"Ошибка",
@@ -1697,8 +1674,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
         } else {
             result = app.Run();
         }
-        delete g_bg;
-        g_bg = nullptr;
     }
 
     if (SUCCEEDED(com)) CoUninitialize();
