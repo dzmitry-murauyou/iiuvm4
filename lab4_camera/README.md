@@ -49,6 +49,76 @@ setx OPENCV_DIR "C:\opencv\build"
 Результат: `bin\x64\Release\Lab4_Camera.exe`, DLL OpenCV копируются туда же
 автоматически (Post-Build Event).
 
+### 3.1. Как задать `OpenCvDir` / `OpenCvVersion` (своё свойство)
+
+Это **пользовательские свойства MSBuild**, поэтому в окне
+«Свойства проекта» (Project Properties) их не видно — там только встроенные
+настройки компилятора и линковщика. Задать их можно четырьмя способами.
+
+**Способ 1 — системная переменная окружения (проще всего, ничего не правим):**
+
+```bat
+setx OPENCV_DIR "C:\opencv\build"
+setx OPENCV_VERSION "4120"
+```
+
+Перезапустить Visual Studio. Проект сам подхватит оба значения: в `.vcxproj`
+стоит `$(OPENCV_DIR)` и `$(OPENCV_VERSION)` как первый приоритет.
+
+**Способ 2 — правка самого проекта** (файл `Lab4_Camera\Lab4_Camera.vcxproj`):
+
+```xml
+<PropertyGroup Label="OpenCV">
+  <OpenCvDir Condition="'$(OPENCV_DIR)' != ''">$(OPENCV_DIR)</OpenCvDir>
+  <OpenCvDir Condition="'$(OpenCvDir)' == ''">C:\opencv\build</OpenCvDir>   <!-- ← свой путь -->
+
+  <OpenCvVersion Condition="'$(OPENCV_VERSION)' != ''">$(OPENCV_VERSION)</OpenCvVersion>
+  <OpenCvVersion Condition="'$(OpenCvVersion)' == ''">4120</OpenCvVersion>   <!-- ← своя версия -->
+</PropertyGroup>
+```
+
+В Visual Studio: правый клик по проекту → **Unload Project** → правый клик →
+**Edit Project File** (или просто открыть `.vcxproj` в Блокноте/VS Code).
+
+**Способ 3 — отдельный property sheet (не трогает проект, удобно для чужого ПК):**
+
+1. `View → Other Windows → Property Manager` (в VS 2026: `View → Property Manager`);
+2. правый клик по конфигурации (**Release | x64**) → **Add New Project Property Sheet…**;
+3. назвать, например, `opencv.props`, сохранить в папке проекта;
+4. открыть его в редакторе и вписать внутрь `<Project>`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros">
+    <OpenCvDir>C:\opencv\build</OpenCvDir>
+    <OpenCvVersion>4120</OpenCvVersion>
+  </PropertyGroup>
+</Project>
+```
+
+Property Sheet подключается *после* самого проекта, поэтому его значения
+перекрывают значения по умолчанию (условия `Condition` в проекте при этом
+остаются в силе — если `OPENCV_DIR` не задана, победит `.props`).
+
+**Способ 4 — из командной строки, без правок вообще:**
+
+```bat
+msbuild Lab4_Camera.sln /p:Configuration=Release /p:Platform=x64 ^
+        /p:OpenCvDir="C:\opencv\build" /p:OpenCvVersion=4100
+```
+
+Свойства из `/p:` имеют наивысший приоритет.
+
+**Проверка, что применилось.** При сборке первым делом печатается строка
+
+```
+OpenCV: каталог = C:\opencv\build, версия библиотеки = opencv_world4120.lib
+```
+
+и, если такого `.lib` нет в `x64\vc*\lib`, выводится предупреждение с
+подсказкой — это быстрее, чем ловить `LNK1104` на этапе линковки.
+
 ### Если OpenCV другой версии
 
 В `Lab4_Camera.vcxproj` есть два свойства — поправьте их под свою сборку:

@@ -27,9 +27,21 @@
     OpenCvVersion ниже: 4.8 -> 480, 4.9 -> 490, 4.10 -> 4100 и т.д.
   -->
   <PropertyGroup Label="OpenCV">
+    <!--
+      Порядок выбора значения (первое найденное побеждает):
+        1) свойство, переданное при сборке:  msbuild /p:OpenCvVersion=4100
+        2) свойство из Property Sheet (.props) или из системных переменных
+        3) ОБЫЧНАЯ СИСТЕМНАЯ ПЕРЕМЕННАЯ окружения OPENCV_DIR / OPENCV_VERSION
+        4) значения по умолчанию ниже
+      ВНИМАНИЕ: эти два свойства НЕ видны в окне «Свойства проекта» —
+      это пользовательские свойства MSBuild, их правят в тексте проекта
+      либо в отдельном .props-файле (см. README, раздел 3.1).
+    -->
     <OpenCvDir Condition="'$(OPENCV_DIR)' != ''">$(OPENCV_DIR)</OpenCvDir>
     <OpenCvDir Condition="'$(OpenCvDir)' == ''">C:\opencv\build</OpenCvDir>
-    <OpenCvVersion Condition="'$(OpenCvVersion)' == ''">4100</OpenCvVersion>
+
+    <OpenCvVersion Condition="'$(OPENCV_VERSION)' != ''">$(OPENCV_VERSION)</OpenCvVersion>
+    <OpenCvVersion Condition="'$(OpenCvVersion)' == ''">4120</OpenCvVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
@@ -71,7 +83,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(OpenCvDir)\x64\vc17\lib;$(OpenCvDir)\x64\vc16\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(OpenCvDir)\x64\vc17\lib;$(OpenCvDir)\x64\vc16\lib;$(OpenCvDir)\x64\vc15\lib;$(OpenCvDir)\x64\vc14\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>comctl32.lib;shell32.lib;user32.lib;gdi32.lib;advapi32.lib;ole32.lib;oleaut32.lib;uuid.lib;strmiids.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <ResourceCompile>
@@ -121,6 +133,17 @@ if exist "$(OpenCvDir)\x64\vc16\bin\*.dll" copy /Y "$(OpenCvDir)\x64\vc16\bin\*.
   <ItemGroup>
     <None Include="..\README.md" />
   </ItemGroup>
+
+  <!--
+    Диагностика: печатает в окно сборки, какие пути и версия используются,
+    и предупреждает, если нужного opencv_world*.lib нет на месте.
+    Если OpenCV установлен в другое место — правьте OpenCvDir/OpenCvVersion.
+  -->
+  <Target Name="CheckOpenCv" BeforeTargets="PrepareForBuild">
+    <Message Importance="high" Text="OpenCV: каталог = $(OpenCvDir), версия библиотеки = opencv_world$(OpenCvVersion).lib" />
+    <Warning Condition="!Exists('$(OpenCvDir)\x64\vc17\lib\opencv_world$(OpenCvVersion).lib') and !Exists('$(OpenCvDir)\x64\vc16\lib\opencv_world$(OpenCvVersion).lib') and !Exists('$(OpenCvDir)\x64\vc15\lib\opencv_world$(OpenCvVersion).lib') and !Exists('$(OpenCvDir)\x64\vc14\lib\opencv_world$(OpenCvVersion).lib')"
+             Text="Не найден opencv_world$(OpenCvVersion).lib в '$(OpenCvDir)\x64\vc*\lib'. Проверьте путь OPENCV_DIR и свойство OpenCvVersion (4.10 -&gt; 4100, 4.12 -&gt; 4120, 5.0 -&gt; 5000)." />
+  </Target>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
