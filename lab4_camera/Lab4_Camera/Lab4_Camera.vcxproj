@@ -129,6 +129,7 @@ if exist "$(OpenCvDir)\x64\vc16\bin\*.dll" copy /Y "$(OpenCvDir)\x64\vc16\bin\*.
   </ItemGroup>
   <ItemGroup>
     <Image Include="app.ico" />
+    <Image Include="bg.jpg" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\README.md" />

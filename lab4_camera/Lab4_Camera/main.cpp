@@ -2,16 +2,15 @@
 //  Лабораторная работа №4. Система видеонаблюдения на базе веб-камеры
 //  Вариант А5. Скрытый режим фотонаблюдения
 //
-//  Всё приложение — один файл: журнал, захват, запись, интерфейс, трей,
-//  глобальная горячая клавиша. Сборка: Visual Studio 2026, проект
-//  Lab4_Camera.vcxproj (см. README.md).
+//  Всё приложение — один файл (main.cpp). Оформление повторяет ЛР №1:
+//  GDI+, фон bg.jpg с затемнением, полупрозрачные карточки, Segoe UI.
 //
-//  Что делает:
-//    * предпросмотр с веб-камеры в реальном времени (OpenCV/DirectShow);
-//    * снимок JPEG по кнопке и по глобальной клавише Ctrl+Shift+F12;
+//  Что умеет:
+//    * предпросмотр с веб-камеры в реальном времени;
+//    * снимок JPEG — кнопкой и глобальной клавишей Ctrl+Shift+F12;
 //    * запись видео AVI/MJPEG;
-//    * свёртывание в трей и фоновая работа без окна;
-//    * журнал событий с метками времени и выгрузка отчёта.
+//    * скрытый режим: окно в трей, снимок без окна, уведомления;
+//    * журнал событий и выгрузка отчёта.
 // ===========================================================================
 
 #ifndef NOMINMAX
@@ -20,11 +19,15 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 
 #include <windows.h>
 #include <commctrl.h>
 #include <dbt.h>
 #include <dshow.h>
+#include <gdiplus.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -38,7 +41,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
-#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <iterator>
@@ -51,45 +53,56 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "strmiids.lib")
+#pragma comment(lib, "gdiplus.lib")
 
-// Common Controls v6 — из-за этого кнопки и список выглядят как в Windows 11.
+// Common Controls v6 — оформление кнопок и списков как в Windows 11.
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
  name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
  processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace {
 
+using namespace Gdiplus;
+using cv::Mat;   // чтобы не писать cv::Mat в каждом объявлении
+
 // ===========================================================================
-//  1. Оформление интерфейса
-//     Все цвета собраны здесь: чтобы подогнать окно под стиль ЛР №1,
-//     достаточно поменять значения в этом блоке.
+//  1. Оформление — те же цвета и размеры, что в ЛР №1 (theme.h)
 // ===========================================================================
 namespace ui {
 
-const COLORREF kWindow    = RGB(245, 246, 248);   // фон окна
-const COLORREF kHeader    = RGB(255, 255, 255);   // шапка
-const COLORREF kPanel     = RGB(255, 255, 255);   // панели
-const COLORREF kBorder    = RGB(208, 213, 221);   // рамки
-const COLORREF kText      = RGB(32, 37, 46);      // основной текст
-const COLORREF kTextDim   = RGB(108, 117, 132);   // подписи
-const COLORREF kAccent    = RGB(0, 108, 200);     // акцент
-const COLORREF kOk        = RGB(22, 152, 84);     // камера подключена
-const COLORREF kWarn      = RGB(206, 132, 0);     // подключение / предупреждение
-const COLORREF kError     = RGB(198, 40, 40);     // ошибка / запись
-const COLORREF kPreview   = RGB(28, 30, 34);      // фон предпросмотра
-const COLORREF kLogBg     = RGB(252, 252, 253);   // фон журнала
+const Color Bg(255, 10, 14, 24);       // базовый фон под картинкой
+const Color Card(215, 18, 26, 44);     // карточка
+const Color Txt(255, 235, 240, 248);   // основной текст
+const Color Sub(255, 165, 178, 198);   // подписи
+const Color Dim(255, 120, 130, 150);   // неактивное
+const Color Line(255, 70, 95, 135);    // рамки, разделители
+const Color Good(255, 46, 204, 113);   // камера подключена
+const Color Warn(255, 241, 196, 15);   // подключение / предупреждение
+const Color Bad(255, 235, 87, 87);     // ошибка / запись
 
-const int kMargin = 12;
+const Color Field(235, 12, 18, 30);    // поле ввода, выпадающий список
+const Color Btn(255, 30, 42, 64);      // обычная кнопка
+const Color BtnHot(255, 42, 58, 86);   // кнопка под курсором / нажата
+const Color Preview(255, 8, 10, 16);   // подложка под видео
+
+// Геометрия
+const int Pad = 28;
+const int Gap = 16;
+const int HeaderH = 96;
+const int LogH = 168;
+const int SaveH = 92;
+const int PanelW = 360;
+const int RowH = 26;
+const REAL Radius = 6.0f;
 
 }  // namespace ui
 
 // ===========================================================================
-//  2. Мелкие утилиты: строки, время, файлы
+//  2. Утилиты: строки, время, файлы
 // ===========================================================================
 
 std::wstring Format(const wchar_t* fmt, ...) {
@@ -111,8 +124,8 @@ std::string ToUtf8(const std::wstring& text) {
     return out;
 }
 
-// Путь в системной ANSI-кодировке: нужен, если OpenCV не понимает UTF-8
-// (каталог с кириллицей, например C:\Users\Дмитрий\...).
+// Системная ANSI-кодировка: нужна, если OpenCV не понял UTF-8 путь
+// (например, C:\Users\Дмитрий\Pictures).
 std::string ToAnsi(const std::wstring& text) {
     if (text.empty()) return {};
     const int size = WideCharToMultiByte(CP_ACP, 0, text.c_str(), (int)text.size(), nullptr, 0,
@@ -132,7 +145,6 @@ std::wstring NowStamp(bool milliseconds) {
                                  st.wHour, st.wMinute, st.wSecond);
 }
 
-// "20261029_183012" — для имён файлов.
 std::wstring FileStamp() {
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -176,24 +188,15 @@ bool EnsureDir(const std::wstring& path) {
         partial += path[i];
         const bool boundary = (path[i] == L'\\' || path[i] == L'/');
         if (!boundary && i + 1 != path.size()) continue;
-        if (partial.size() <= 3 && partial[1] == L':') continue;  // "C:\"
+        if (partial.size() <= 3 && partial[1] == L':') continue;   // "C:\"
         std::wstring probe = partial;
         while (!probe.empty() && (probe.back() == L'\\' || probe.back() == L'/')) probe.pop_back();
-        if (!probe.empty() && !DirExists(probe) &&
-            !CreateDirectoryW(probe.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        if (!probe.empty() && !DirExists(probe) && !CreateDirectoryW(probe.c_str(), nullptr) &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
             return false;
         }
     }
     return DirExists(path);
-}
-
-std::wstring ModuleDir() {
-    wchar_t path[MAX_PATH * 2] = {};
-    const DWORD n = GetModuleFileNameW(nullptr, path, (DWORD)std::size(path));
-    if (n == 0) return L".";
-    std::wstring s(path, n);
-    const size_t pos = s.find_last_of(L"\\/");
-    return (pos == std::wstring::npos) ? L"." : s.substr(0, pos);
 }
 
 std::wstring DefaultSaveDir() {
@@ -201,7 +204,7 @@ std::wstring DefaultSaveDir() {
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_MYPICTURES, nullptr, SHGFP_TYPE_CURRENT, path))) {
         return JoinPath(path, L"CameraLab4");
     }
-    return JoinPath(ModuleDir(), L"snapshots");
+    return L"snapshots";
 }
 
 // Имя файла с защитой от совпадения в одну и ту же секунду.
@@ -215,8 +218,7 @@ std::wstring UniquePath(const std::wstring& dir, const std::wstring& prefix,
     return candidate;
 }
 
-// OpenCV принимает путь как байты: пробуем UTF-8, затем системную ANSI.
-bool ImwriteAny(const std::wstring& path, const cv::Mat& image, int quality) {
+bool ImwriteAny(const std::wstring& path, const Mat& image, int quality) {
     const std::vector<int> params{cv::IMWRITE_JPEG_QUALITY, std::clamp(quality, 1, 100)};
     try {
         if (cv::imwrite(ToUtf8(path), image, params)) return true;
@@ -227,22 +229,138 @@ bool ImwriteAny(const std::wstring& path, const cv::Mat& image, int quality) {
 }
 
 // ===========================================================================
-//  3. Журнал событий
+//  3. Рисование в стиле ЛР №1 (аналог gfx.cpp)
+// ===========================================================================
+
+Bitmap* g_bg = nullptr;
+
+Bitmap* LoadBg(HINSTANCE inst) {
+    HRSRC res = FindResourceW(inst, MAKEINTRESOURCEW(201), RT_RCDATA);
+    if (!res) return nullptr;
+    const DWORD size = SizeofResource(inst, res);
+    if (!size) return nullptr;
+    HGLOBAL loaded = LoadResource(inst, res);
+    if (!loaded) return nullptr;
+    void* data = LockResource(loaded);
+    if (!data) return nullptr;
+
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!memory) return nullptr;
+    void* dst = GlobalLock(memory);
+    if (!dst) {
+        GlobalFree(memory);
+        return nullptr;
+    }
+    memcpy(dst, data, size);
+    GlobalUnlock(memory);
+
+    IStream* stream = nullptr;
+    if (CreateStreamOnHGlobal(memory, TRUE, &stream) != S_OK) {
+        GlobalFree(memory);
+        return nullptr;
+    }
+    Bitmap* bitmap = new Bitmap(stream);
+    stream->Release();
+    if (bitmap->GetLastStatus() != Ok) {
+        delete bitmap;
+        return nullptr;
+    }
+    return bitmap;
+}
+
+// Фон: картинка bg.jpg на весь экран + затемнение — как в ЛР №1.
+void PaintBg(Graphics& g, int w, int h) {
+    SolidBrush base(ui::Bg);
+    g.FillRectangle(&base, 0, 0, w, h);
+    if (g_bg) {
+        const REAL iw = (REAL)g_bg->GetWidth(), ih = (REAL)g_bg->GetHeight();
+        if (iw > 0 && ih > 0) {
+            const REAL s = std::max(w / iw, h / ih);
+            g.DrawImage(g_bg, (w - iw * s) / 2, (h - ih * s) / 2, iw * s, ih * s);
+        }
+    }
+    SolidBrush dim(Color(150, 6, 10, 18));
+    g.FillRectangle(&dim, 0, 0, w, h);
+}
+
+void FillRectG(Graphics& g, const RECT& rc, const Color& color) {
+    SolidBrush brush(color);
+    g.FillRectangle(&brush, (INT)rc.left, (INT)rc.top, (INT)(rc.right - rc.left),
+                    (INT)(rc.bottom - rc.top));
+}
+
+void Rect(Graphics& g, const RECT& rc, const Color& fill, const Color& border, REAL radius) {
+    GraphicsPath path;
+    const REAL x = (REAL)rc.left, y = (REAL)rc.top;
+    const REAL w = (REAL)(rc.right - rc.left), h = (REAL)(rc.bottom - rc.top);
+    const REAL d = radius * 2;
+    path.AddArc(x, y, d, d, 180, 90);
+    path.AddArc(x + w - d, y, d, d, 270, 90);
+    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    path.AddArc(x, y + h - d, d, d, 90, 90);
+    path.CloseFigure();
+    SolidBrush brush(fill);
+    g.FillPath(&brush, &path);
+    Pen pen(border, 1.0f);
+    g.DrawPath(&pen, &path);
+}
+
+// Карточка: полупрозрачная плашка с рамкой (Card() из ЛР №1).
+void Card(Graphics& g, const RECT& rc) {
+    Rect(g, rc, ui::Card, ui::Line, ui::Radius);
+}
+
+void TextG(Graphics& g, const std::wstring& text, const RECT& rc, Font* font, const Color& color,
+           StringAlignment align = StringAlignmentNear) {
+    StringFormat fmt;
+    fmt.SetAlignment(align);
+    fmt.SetLineAlignment(StringAlignmentCenter);
+    fmt.SetTrimming(StringTrimmingEllipsisCharacter);
+    fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+    SolidBrush brush(color);
+    RectF layout((REAL)rc.left, (REAL)rc.top, (REAL)(rc.right - rc.left),
+                 (REAL)(rc.bottom - rc.top));
+    g.DrawString(text.c_str(), -1, font, layout, &fmt, &brush);
+}
+
+// Строка «подпись : значение» внутри карточки (Row() из ЛР №1).
+void Row(Graphics& g, const RECT& card, int y, const std::wstring& label,
+         const std::wstring& value, Font* label_font, Font* value_font, const Color& value_color) {
+    const int lx = card.left + 18;
+    const int vx = card.left + 130;
+    RECT l{lx, y, vx - 8, y + ui::RowH};
+    RECT v{vx, y, card.right - 18, y + ui::RowH};
+    TextG(g, label, l, label_font, ui::Sub);
+    TextG(g, value, v, value_font, value_color);
+}
+
+void Separator(Graphics& g, const RECT& card, int y, int inset) {
+    Pen pen(ui::Line, 1.0f);
+    g.DrawLine(&pen, (REAL)(card.left + inset), (REAL)y, (REAL)(card.right - inset), (REAL)y);
+}
+
+void Dot(Graphics& g, int cx, int cy, int r, const Color& color) {
+    SolidBrush brush(color);
+    g.FillEllipse(&brush, cx - r, cy - r, r * 2, r * 2);
+}
+
+// ===========================================================================
+//  4. Журнал событий
 // ===========================================================================
 
 enum class LogLevel { Info, Warn, Error, Background };
 
-COLORREF LevelColor(LogLevel level) {
+Color LevelColor(LogLevel level) {
     switch (level) {
-        case LogLevel::Error:      return ui::kError;
-        case LogLevel::Warn:       return ui::kWarn;
-        case LogLevel::Background: return ui::kAccent;
-        case LogLevel::Info:       default: return ui::kText;
+        case LogLevel::Error:      return ui::Bad;
+        case LogLevel::Warn:       return ui::Warn;
+        case LogLevel::Background: return ui::Good;
+        case LogLevel::Info:       default: return ui::Txt;
     }
 }
 
 // ===========================================================================
-//  4. Камера: перечисление устройств и поток захвата
+//  5. Камера: перечисление устройств и поток захвата
 // ===========================================================================
 
 struct Frame {
@@ -253,12 +371,12 @@ struct Frame {
 };
 
 struct CameraDevice {
-    std::wstring name;   // "USB2.0 HD UVC WebCam"
+    std::wstring name;   // «USB2.0 HD UVC WebCam»
     std::wstring path;   // символьный путь устройства
 };
 
 // Перечисление камер через DirectShow (ICreateDevEnum + IPropertyBag).
-// Индексы совпадают с порядком, который использует OpenCV (бэкенд DSHOW).
+// Порядок совпадает с тем, который использует OpenCV с бэкендом DSHOW.
 std::vector<CameraDevice> EnumerateCameras() {
     std::vector<CameraDevice> result;
 
@@ -298,13 +416,12 @@ std::vector<CameraDevice> EnumerateCameras() {
     return result;
 }
 
-// Класс записи видео объявлен заранее: поток захвата отдаёт ему кадры.
 class Recorder;
 
 enum class CamState { Off, Opening, On, Failed };
 
-// Поток захвата: открывает камеру, постоянно читает кадры и хранит последний.
-// GUI берёт копию последнего кадра — блокирующих вызовов в интерфейсе нет.
+// Поток захвата: открывает камеру, постоянно читает кадры, хранит последний.
+// GUI только копирует последний кадр — интерфейс не ждёт чтения с камеры.
 class Camera {
 public:
     Camera() = default;
@@ -313,12 +430,11 @@ public:
     void SetNotifyWindow(HWND hwnd) { hwnd_ = hwnd; }
     void SetRecorder(Recorder* recorder) { recorder_.store(recorder); }
 
-    bool Start(int index, int width, int height, double fps) {
+    void Start(int index, int width, int height, double fps) {
         Stop();
         running_.store(true);
         state_ = CamState::Opening;
         worker_ = std::thread(&Camera::Run, this, index, width, height, fps);
-        return true;
     }
 
     void Stop() {
@@ -340,15 +456,13 @@ public:
     }
 
     CamState State() const { return state_.load(); }
-    int Width() const { return width_.load(); }
-    int Height() const { return height_.load(); }
-    double DeclaredFps() const { return declared_fps_.load(); }
     double MeasuredFps() const { return measured_fps_.load(); }
+    double DeclaredFps() const { return declared_fps_.load(); }
+    unsigned long long FrameCount() const { return frame_count_.load(); }
     std::wstring FormatName() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return format_;
     }
-    unsigned long long FrameCount() const { return frame_count_.load(); }
 
 private:
     void Run(int index, int want_w, int want_h, double want_fps);
@@ -369,15 +483,13 @@ private:
     Frame latest_;
     std::wstring format_;
 
-    std::atomic<int> width_{0};
-    std::atomic<int> height_{0};
     std::atomic<double> declared_fps_{0.0};
     std::atomic<double> measured_fps_{0.0};
     std::atomic<unsigned long long> frame_count_{0};
 };
 
 // ===========================================================================
-//  5. Запись видео (AVI / MJPEG) в отдельном потоке
+//  6. Запись видео (AVI / MJPEG) в отдельном потоке
 // ===========================================================================
 
 class Recorder {
@@ -385,6 +497,13 @@ public:
     ~Recorder() { Stop(); }
 
     bool Active() const { return active_.load(); }
+    unsigned long long Frames() const { return frames_.load(); }
+    std::wstring Path() const { return path_; }
+
+    double Seconds() const {
+        if (!active_.load()) return seconds_;
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
+    }
 
     bool Start(const std::wstring& path, int width, int height, double fps) {
         if (active_.load()) return false;
@@ -442,13 +561,6 @@ public:
         }
     }
 
-    unsigned long long Frames() const { return frames_.load(); }
-    double Seconds() const {
-        if (!active_.load()) return seconds_;
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
-    }
-    std::wstring Path() const { return path_; }
-
 private:
     void Run() {
         while (!stop_.load()) {
@@ -464,9 +576,9 @@ private:
             if (!frame.ok()) continue;
 
             try {
-                cv::Mat mat(frame.height, frame.width, CV_8UC3, frame.bgr.data());
+                Mat mat(frame.height, frame.width, CV_8UC3, frame.bgr.data());
                 if (frame.width != width_ || frame.height != height_) {
-                    cv::Mat resized;
+                    Mat resized;
                     cv::resize(mat, resized, cv::Size(width_, height_));
                     mat = resized;
                 }
@@ -496,8 +608,8 @@ private:
     std::chrono::steady_clock::time_point started_{};
 };
 
-// Определение потока захвата вынесено сюда: внутри класса Camera тип Recorder
-// ещё неполный, а Push() нужно вызывать по-настоящему.
+// Тело потока захвата вынесено сюда: внутри класса Camera тип Recorder ещё
+// неполный, а Push() нужно вызывать по-настоящему.
 void Camera::Run(int index, int want_w, int want_h, double want_fps) {
     cv::VideoCapture capture;
     bool opened = false;
@@ -519,11 +631,11 @@ void Camera::Run(int index, int want_w, int want_h, double want_fps) {
     if (want_h > 0) capture.set(cv::CAP_PROP_FRAME_HEIGHT, want_h);
     if (want_fps > 0) capture.set(cv::CAP_PROP_FPS, want_fps);
 
-    cv::Mat frame;
+    Mat frame;
     try {
         capture.read(frame);
     } catch (const cv::Exception&) {
-        frame = cv::Mat();
+        frame = Mat();
     }
     if (frame.empty()) {
         capture.release();
@@ -532,22 +644,19 @@ void Camera::Run(int index, int want_w, int want_h, double want_fps) {
         return;
     }
 
-    const std::string fourcc_code = [&] {
-        const int code = (int)capture.get(cv::CAP_PROP_FOURCC);
-        std::string s(4, '\0');
-        for (int i = 0; i < 4; ++i) s[i] = (char)((code >> (8 * i)) & 0xFF);
-        return s;
-    }();
-
-    width_.store(frame.cols);
-    height_.store(frame.rows);
-    declared_fps_.store(capture.get(cv::CAP_PROP_FPS));
     {
+        const int code = (int)capture.get(cv::CAP_PROP_FOURCC);
+        std::string fourcc(4, '\0');
+        for (int i = 0; i < 4; ++i) fourcc[i] = (char)((code >> (8 * i)) & 0xFF);
         std::lock_guard<std::mutex> lock(mutex_);
-        format_ = std::wstring(fourcc_code.begin(), fourcc_code.end());
-        if (format_.empty() || format_.size() != 4) format_ = L"BGR24";
+        format_ = std::wstring(fourcc.begin(), fourcc.end());
+        if (format_.size() != 4) format_ = L"BGR24";
+        for (wchar_t& ch : format_) {
+            if (ch < 32) ch = L'?';
+        }
     }
-    Notify(CamState::On, Format(L"Камера подключена: %dx%d", frame.cols, frame.rows));
+    declared_fps_.store(capture.get(cv::CAP_PROP_FPS));
+    Notify(CamState::On, Format(L"Камера подключена: %d × %d", frame.cols, frame.rows));
 
     auto fps_start = std::chrono::steady_clock::now();
     unsigned long long fps_frames = 0;
@@ -557,12 +666,11 @@ void Camera::Run(int index, int want_w, int want_h, double want_fps) {
         try {
             capture.read(frame);
         } catch (const cv::Exception&) {
-            frame = cv::Mat();
+            frame = Mat();
         }
 
         if (frame.empty()) {
-            // Камеру могли выдернуть: несколько попыток, затем выходим.
-            if (++failures > 30) break;
+            if (++failures > 30) break;   // камеру выдернули
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
@@ -580,14 +688,12 @@ void Camera::Run(int index, int want_w, int want_h, double want_fps) {
         const size_t row = (size_t)frame.cols * 3;
         out.bgr.resize(row * (size_t)frame.rows);
         if (frame.step == row) {
-            std::memcpy(out.bgr.data(), frame.data, row * (size_t)frame.rows);
+            memcpy(out.bgr.data(), frame.data, row * (size_t)frame.rows);
         } else {
             for (int y = 0; y < frame.rows; ++y) {
-                std::memcpy(out.bgr.data() + row * (size_t)y, frame.ptr(y), row);
+                memcpy(out.bgr.data() + row * (size_t)y, frame.ptr(y), row);
             }
         }
-        width_.store(out.width);
-        height_.store(out.height);
 
         if (Recorder* recorder = recorder_.load()) recorder->Push(out);
 
@@ -606,7 +712,7 @@ void Camera::Run(int index, int want_w, int want_h, double want_fps) {
             fps_start = std::chrono::steady_clock::now();
         }
 
-        if (HWND hwnd = hwnd_) PostMessageW(hwnd, WM_APP + 2, 0, 0);   // "новый кадр"
+        if (hwnd_) PostMessageW(hwnd_, WM_APP + 2, 0, 0);   // «новый кадр»
     }
 
     capture.release();
@@ -617,31 +723,30 @@ void Camera::Run(int index, int want_w, int want_h, double want_fps) {
     running_.store(false);
 }
 
-
 // ===========================================================================
-//  6. Главное окно приложения
+//  7. Главное окно
 // ===========================================================================
 
 const wchar_t* kClassName = L"Lab4CameraWindow";
-const wchar_t* kAppTitle = L"ЛР №4 — видеонаблюдение (вариант А5: скрытый режим фотонаблюдения)";
+const wchar_t* kTitle = L"Система видеонаблюдения";
 
-struct LogEntry {
-    LogLevel level;
-    std::wstring text;
-};
-
-const wchar_t* kResolutions[] = {L"1920 × 1080", L"1280 × 720", L"1024 × 768",
-                                 L"960 × 540",   L"800 × 600",  L"640 × 480"};
+const wchar_t* kResTitles[] = {L"1920 × 1080", L"1280 × 720", L"1024 × 768",
+                               L"960 × 540",   L"800 × 600",  L"640 × 480"};
 const int kResW[] = {1920, 1280, 1024, 960, 800, 640};
 const int kResH[] = {1080, 720, 768, 540, 600, 480};
 
 const wchar_t* kFpsTitles[] = {L"30", L"25", L"20", L"15", L"10"};
 const double kFpsValues[] = {30.0, 25.0, 20.0, 15.0, 10.0};
 
+struct LogEntry {
+    LogLevel level;
+    std::wstring text;
+};
+
 class App {
 public:
     enum : UINT {
-        WM_STATE = WM_APP + 1,   // состояние камеры (из потока захвата)
+        WM_STATE = WM_APP + 1,   // состояние камеры из потока захвата
         WM_FRAME = WM_APP + 2,   // готов новый кадр
         WM_TRAY = WM_APP + 3,    // события значка в трее
     };
@@ -658,9 +763,7 @@ public:
         ID_REC_STOP,
         ID_DIR,
         ID_BROWSE,
-        ID_OPEN_DIR,
         ID_REPORT,
-        ID_CLEAR_LOG,
         ID_TRAY_BUTTON,
         ID_LOG,
         ID_MENU_SHOW = 2001,
@@ -680,14 +783,14 @@ public:
         wc.hInstance = inst_;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hIcon = (HICON)LoadImageW(inst_, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0,
-                                     LR_DEFAULTSIZE);
+                                     LR_DEFAULTSIZE | LR_SHARED);
         if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
         wc.hIconSm = wc.hIcon;
         wc.lpszClassName = kClassName;
         if (!RegisterClassExW(&wc)) return false;
 
-        hwnd_ = CreateWindowExW(0, kClassName, kAppTitle, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1180, 780, nullptr, nullptr, inst_,
+        hwnd_ = CreateWindowExW(0, kClassName, kTitle, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1180, 820, nullptr, nullptr, inst_,
                                 this);
         if (!hwnd_) return false;
 
@@ -707,7 +810,7 @@ public:
 
 private:
     // -----------------------------------------------------------------------
-    //  Создание окна
+    //  Окно
     // -----------------------------------------------------------------------
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         App* self = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -726,24 +829,28 @@ private:
             case WM_CREATE:
                 OnCreate();
                 return 0;
+
             case WM_SIZE:
                 Layout();
                 return 0;
+
             case WM_GETMINMAXINFO: {
                 auto* info = reinterpret_cast<MINMAXINFO*>(lp);
-                info->ptMinTrackSize.x = S(980);
-                info->ptMinTrackSize.y = S(660);
+                info->ptMinTrackSize.x = 980;
+                info->ptMinTrackSize.y = 720;
                 return 0;
             }
+
             case WM_ERASEBKGND:
-                return 1;
+                return 1;   // фон рисуем сами, без мерцания
+
             case WM_PAINT: {
                 PAINTSTRUCT ps;
                 HDC dc = BeginPaint(hwnd_, &ps);
                 RECT rc;
                 GetClientRect(hwnd_, &rc);
                 if (rc.right > 0 && rc.bottom > 0) {
-                    // Двойная буферизация: окно не мерцает на 30 кадрах в секунду.
+                    // Двойная буферизация: иначе видео мерцает на 30 кадрах в секунду.
                     HDC mem = CreateCompatibleDC(dc);
                     HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
                     HGDIOBJ old = SelectObject(mem, bmp);
@@ -756,365 +863,316 @@ private:
                 EndPaint(hwnd_, &ps);
                 return 0;
             }
+
             case WM_TIMER:
                 OnTimer();
                 return 0;
+
             case WM_COMMAND:
                 OnCommand(LOWORD(wp), HIWORD(wp));
                 return 0;
+
             case WM_HOTKEY:
                 OnHotkey();
                 return 0;
+
             case WM_DEVICECHANGE:
                 if (wp == DBT_DEVNODES_CHANGED || wp == DBT_DEVICEARRIVAL ||
                     wp == DBT_DEVICEREMOVECOMPLETE) {
                     RefreshDevices(false);
                 }
                 return TRUE;
+
             case WM_STATE: {
                 auto* text = reinterpret_cast<std::wstring*>(lp);
                 OnCameraState((CamState)wp, text ? *text : L"");
                 delete text;
                 return 0;
             }
+
             case WM_FRAME:
                 InvalidateRect(hwnd_, &preview_rc_, FALSE);
                 return 0;
+
             case WM_TRAY:
                 OnTray(lp);
                 return 0;
+
             case WM_DRAWITEM: {
                 auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
-                if (dis && dis->CtlID == ID_LOG) {
-                    DrawLogItem(dis);
-                    return TRUE;
+                if (!dis) break;
+                switch (dis->CtlType) {
+                    case ODT_BUTTON:   DrawButton(dis); return TRUE;
+                    case ODT_COMBOBOX: DrawCombo(dis); return TRUE;
+                    case ODT_LISTBOX:  DrawLogItem(dis); return TRUE;
+                    default: break;
                 }
                 break;
             }
-            case WM_CTLCOLORSTATIC:
-            case WM_CTLCOLORBTN: {
-                HDC dc = (HDC)wp;
-                SetTextColor(dc, ui::kText);
-                SetBkColor(dc, ui::kPanel);
-                return (LRESULT)panel_brush_;
-            }
-            case WM_CTLCOLOREDIT: {
-                HDC dc = (HDC)wp;
-                SetTextColor(dc, ui::kText);
-                SetBkColor(dc, ui::kPanel);
-                return (LRESULT)panel_brush_;
-            }
+
+            case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX: {
                 HDC dc = (HDC)wp;
-                SetTextColor(dc, ui::kText);
-                SetBkColor(dc, ui::kLogBg);
-                return (LRESULT)log_brush_;
+                SetTextColor(dc, RGB(235, 240, 248));
+                SetBkColor(dc, RGB(12, 18, 30));
+                return (LRESULT)field_brush_;
             }
-            case WM_DPICHANGED: {
-                dpi_ = HIWORD(wp);
-                CreateFonts();
-                RECT* rc = reinterpret_cast<RECT*>(lp);
-                SetWindowPos(hwnd_, nullptr, rc->left, rc->top, rc->right - rc->left,
-                             rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
-                Layout();
-                return 0;
-            }
-            case WM_SYSCOMMAND:
-                if ((wp & 0xFFF0) == SC_MINIMIZE && minimize_to_tray_) {
-                    HideToTray();
-                    return 0;
-                }
-                break;
+
             case WM_CLOSE:
                 OnClose();
                 return 0;
+
             case WM_DESTROY:
                 Cleanup();
                 PostQuitMessage(0);
                 return 0;
+
+            default:
+                break;
         }
         return DefWindowProcW(hwnd_, msg, wp, lp);
     }
 
     void OnCreate() {
-        dpi_ = 96;
-        if (HMODULE user32 = GetModuleHandleW(L"user32")) {
-            using GetDpiFn = UINT(WINAPI*)(HWND);
-            auto get_dpi = reinterpret_cast<GetDpiFn>(GetProcAddress(user32, "GetDpiForWindow"));
-            if (get_dpi) {
-                const UINT dpi = get_dpi(hwnd_);
-                if (dpi >= 96 && dpi <= 480) dpi_ = (int)dpi;
-            }
-        }
-
+        field_brush_ = CreateSolidBrush(RGB(12, 18, 30));
         CreateFonts();
-        panel_brush_ = CreateSolidBrush(ui::kPanel);
-        log_brush_ = CreateSolidBrush(ui::kLogBg);
-        window_brush_ = CreateSolidBrush(ui::kWindow);
-        header_brush_ = CreateSolidBrush(ui::kHeader);
-        border_brush_ = CreateSolidBrush(ui::kBorder);
-        preview_brush_ = CreateSolidBrush(ui::kPreview);
-
-        LoadSettings();
-        if (settings_.save_dir.empty()) settings_.save_dir = DefaultSaveDir();
-        EnsureDir(settings_.save_dir);
         CreateControls();
 
         camera_.SetNotifyWindow(hwnd_);
         camera_.SetRecorder(&recorder_);
 
-        // Значок в трее: работает всё время, не только в скрытом режиме.
-        tray_icon_ = (HICON)LoadImageW(inst_, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0,
-                                       LR_DEFAULTSIZE | LR_SHARED);
-        if (!tray_icon_) tray_icon_ = LoadIconW(nullptr, IDI_APPLICATION);
         AddTrayIcon();
-
-        // Глобальная горячая клавиша создания снимка.
         hotkey_ok_ = RegisterHotKey(hwnd_, 1, MOD_CONTROL | MOD_SHIFT, VK_F12) != FALSE;
-
-        SetTimer(hwnd_, 1, 1000, nullptr);
+        SetTimer(hwnd_, 1, 500, nullptr);
 
         AddLog(LogLevel::Info, L"Приложение запущено");
-        if (hotkey_ok_) {
-            AddLog(LogLevel::Info, L"Глобальная клавиша Ctrl+Shift+F12 — снимок в фоне");
-        } else {
-            AddLog(LogLevel::Warn,
-                   L"Ctrl+Shift+F12 уже занята другим приложением — глобальный снимок недоступен");
-        }
+        AddLog(LogLevel::Info, hotkey_ok_
+                                   ? L"Ctrl+Shift+F12 — снимок в фоне (работает из любого окна)"
+                                   : L"Ctrl+Shift+F12 занята другим приложением");
 
         RefreshDevices(true);
         Layout();
     }
 
     void CreateFonts() {
-        if (font_) DeleteObject(font_);
-        if (font_bold_) DeleteObject(font_bold_);
-        if (font_title_) DeleteObject(font_title_);
-        if (font_mono_) DeleteObject(font_mono_);
-        const int h = -MulDiv(9, dpi_, 72);
-        font_ = CreateFontW(h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH, L"Segoe UI");
-        font_bold_ = CreateFontW(h, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH, L"Segoe UI");
-        font_title_ = CreateFontW(-MulDiv(12, dpi_, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        font_mono_ = CreateFontW(h, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 FIXED_PITCH | FF_MODERN, L"Consolas");
+        FontFamily family(L"Segoe UI");
+        FontFamily mono(L"Consolas");
+        f_title_ = new Font(&family, 26, FontStyleBold, UnitPixel);      // заголовок окна
+        f_section_ = new Font(&family, 18, FontStyleBold, UnitPixel);    // заголовок карточки
+        f_label_ = new Font(&family, 14, FontStyleRegular, UnitPixel);   // подпись
+        f_value_ = new Font(&family, 14, FontStyleBold, UnitPixel);      // значение
+        f_button_ = new Font(&family, 14, FontStyleBold, UnitPixel);     // текст кнопки
+        f_log_ = new Font(&mono, 13, FontStyleRegular, UnitPixel);       // журнал
     }
 
     HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int id, DWORD ex = 0) {
-        HWND h = CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, hwnd_,
-                                 (HMENU)(INT_PTR)id, inst_, nullptr);
-        if (h) SendMessageW(h, WM_SETFONT, (WPARAM)font_, TRUE);
-        return h;
+        return CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, hwnd_,
+                               (HMENU)(INT_PTR)id, inst_, nullptr);
     }
 
     void CreateControls() {
-        h_camera_ = Make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_CAMERA,
-                         WS_EX_CLIENTEDGE);
-        h_refresh_ = Make(L"BUTTON", L"Обновить", BS_PUSHBUTTON | WS_TABSTOP, ID_REFRESH);
-        h_res_ = Make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_RES,
-                      WS_EX_CLIENTEDGE);
-        h_fps_ = Make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_FPS,
-                      WS_EX_CLIENTEDGE);
-        h_connect_ = Make(L"BUTTON", L"Подключить камеру", BS_PUSHBUTTON | WS_TABSTOP, ID_CONNECT,
-                          WS_EX_CLIENTEDGE);
-        h_disconnect_ = Make(L"BUTTON", L"Отключить", BS_PUSHBUTTON | WS_TABSTOP, ID_DISCONNECT);
-        h_snapshot_ = Make(L"BUTTON", L"Снимок", BS_PUSHBUTTON | WS_TABSTOP, ID_SNAPSHOT);
-        h_rec_start_ = Make(L"BUTTON", L"Начать запись", BS_PUSHBUTTON | WS_TABSTOP, ID_REC_START);
-        h_rec_stop_ = Make(L"BUTTON", L"Остановить запись", BS_PUSHBUTTON | WS_TABSTOP, ID_REC_STOP);
-        h_dir_ = Make(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, ID_DIR, WS_EX_CLIENTEDGE);
-        h_browse_ = Make(L"BUTTON", L"Обзор…", BS_PUSHBUTTON | WS_TABSTOP, ID_BROWSE);
-        h_open_dir_ = Make(L"BUTTON", L"Открыть каталог", BS_PUSHBUTTON | WS_TABSTOP, ID_OPEN_DIR);
-        h_report_ = Make(L"BUTTON", L"Сохранить отчёт", BS_PUSHBUTTON | WS_TABSTOP, ID_REPORT);
-        h_clear_log_ = Make(L"BUTTON", L"Очистить", BS_PUSHBUTTON | WS_TABSTOP, ID_CLEAR_LOG);
-        h_tray_ = Make(L"BUTTON", L"Свернуть в трей", BS_PUSHBUTTON | WS_TABSTOP, ID_TRAY_BUTTON);
+        // Списки камер, разрешений и частот — owner-draw, чтобы выпадали тёмными.
+        h_camera_ = Make(L"COMBOBOX", L"",
+                         CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL |
+                             WS_TABSTOP,
+                         ID_CAMERA);
+        h_res_ = Make(L"COMBOBOX", L"",
+                      CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL |
+                          WS_TABSTOP,
+                      ID_RES);
+        h_fps_ = Make(L"COMBOBOX", L"",
+                      CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL |
+                          WS_TABSTOP,
+                      ID_FPS);
+
+        h_refresh_ = Make(L"BUTTON", L"Обновить", BS_OWNERDRAW | WS_TABSTOP, ID_REFRESH);
+        h_connect_ = Make(L"BUTTON", L"Подключить", BS_OWNERDRAW | WS_TABSTOP, ID_CONNECT);
+        h_disconnect_ = Make(L"BUTTON", L"Отключить", BS_OWNERDRAW | WS_TABSTOP, ID_DISCONNECT);
+        h_snapshot_ = Make(L"BUTTON", L"Снимок", BS_OWNERDRAW | WS_TABSTOP, ID_SNAPSHOT);
+        h_rec_start_ = Make(L"BUTTON", L"Начать запись", BS_OWNERDRAW | WS_TABSTOP, ID_REC_START);
+        h_rec_stop_ = Make(L"BUTTON", L"Остановить запись", BS_OWNERDRAW | WS_TABSTOP, ID_REC_STOP);
+        h_report_ = Make(L"BUTTON", L"Сохранить отчёт", BS_OWNERDRAW | WS_TABSTOP, ID_REPORT);
+        h_browse_ = Make(L"BUTTON", L"Обзор…", BS_OWNERDRAW | WS_TABSTOP, ID_BROWSE);
+        h_tray_ = Make(L"BUTTON", L"Свернуть в трей", BS_OWNERDRAW | WS_TABSTOP, ID_TRAY_BUTTON);
+
+        h_dir_ = Make(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, ID_DIR);
         h_log_ = Make(L"LISTBOX", L"",
                       WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
                           WS_TABSTOP,
-                      ID_LOG, WS_EX_CLIENTEDGE);
-        if (h_log_) {
-            SendMessageW(h_log_, WM_SETFONT, (WPARAM)font_mono_, TRUE);
-            SendMessageW(h_log_, LB_SETITEMHEIGHT, 0, S(16));
-        }
+                      ID_LOG);
+        SendMessageW(h_log_, LB_SETITEMHEIGHT, 0, 20);
 
-        for (const wchar_t* title : kResolutions) {
-            SendMessageW(h_res_, CB_ADDSTRING, 0, (LPARAM)title);
+        for (const wchar_t* title : kResTitles) SendMessageW(h_res_, CB_ADDSTRING, 0, (LPARAM)title);
+        for (const wchar_t* title : kFpsTitles) SendMessageW(h_fps_, CB_ADDSTRING, 0, (LPARAM)title);
+
+        for (HWND combo : {h_camera_, h_res_, h_fps_}) {
+            SendMessageW(combo, CB_SETITEMHEIGHT, (WPARAM)-1, 20);   // высота поля выбора
         }
-        for (const wchar_t* title : kFpsTitles) {
-            SendMessageW(h_fps_, CB_ADDSTRING, 0, (LPARAM)title);
-        }
-        SendMessageW(h_res_, CB_SETCURSEL, std::clamp(settings_.resolution, 0,
-                                                      (int)std::size(kResolutions) - 1), 0);
-        SendMessageW(h_fps_, CB_SETCURSEL, std::clamp(settings_.fps, 0,
-                                                      (int)std::size(kFpsValues) - 1), 0);
-        SetWindowTextW(h_dir_, settings_.save_dir.c_str());
+        SendMessageW(h_res_, CB_SETCURSEL, 1, 0);
+        SendMessageW(h_fps_, CB_SETCURSEL, 0, 0);
+
+        save_dir_ = DefaultSaveDir();
+        EnsureDir(save_dir_);
+        SetWindowTextW(h_dir_, save_dir_.c_str());
     }
 
     // -----------------------------------------------------------------------
-    //  Разметка и отрисовка
+    //  Разметка
     // -----------------------------------------------------------------------
-    int S(int value) const { return MulDiv(value, dpi_, 96); }
-
     void Layout() {
         if (!h_log_) return;
         RECT rc;
         GetClientRect(hwnd_, &rc);
-        const int m = S(ui::kMargin);
-        const int header_h = S(58);
-        header_rc_ = {0, 0, rc.right, header_h};
+        const int w = rc.right, h = rc.bottom;
+        const int pad = ui::Pad, gap = ui::Gap;
 
-        const int log_h = std::max<int>(S(140), rc.bottom / 5);
-        log_rc_ = {m, rc.bottom - log_h - m, rc.right - m, rc.bottom - m};
+        log_rc_ = {pad, h - pad - ui::LogH, w - pad, h - pad};
+        save_rc_ = {pad, log_rc_.top - gap - ui::SaveH, w - pad, log_rc_.top - gap};
+        panel_rc_ = {w - pad - ui::PanelW, ui::HeaderH, w - pad, save_rc_.top - gap};
+        preview_rc_ = {pad, ui::HeaderH, panel_rc_.left - gap, save_rc_.top - gap};
 
-        const int panel_w = std::min<int>(S(360), std::max<int>(S(320), rc.right / 3));
-        panel_rc_ = {rc.right - m - panel_w, header_h + m, rc.right - m, log_rc_.top - m};
+        tray_rc_ = {w - pad - 152, 28, w - pad, 28 + 34};
 
-        const int left = m;
-        const int left_r = panel_rc_.left - m;
-        const int strip_h = S(92);
-        strip_rc_ = {left, panel_rc_.bottom - strip_h, left_r, panel_rc_.bottom};
-        preview_rc_ = {left, header_h + m, left_r, strip_rc_.top - m};
-
-        // Панель устройства
+        // --- карточка «Камера» ---
         {
-            const int p = S(12);
-            const int row = S(24);
-            int y = panel_rc_.top + S(38);
-            h_camera_label_rc_ = {panel_rc_.left + p, y, panel_rc_.right - p, y + S(16)};
-            y += S(18);
-            const int refresh_w = S(90);
+            const int p = 18;
+            int y = panel_rc_.top + 46;   // ниже заголовка карточки
+            const int combo_h = 24;
+            const int refresh_w = 84;
+
+            camera_label_ = {panel_rc_.left + p, y, panel_rc_.right - p, y + 18};
+            y += 20;
             SetWindowPos(h_camera_, nullptr, panel_rc_.left + p, y,
-                         panel_rc_.right - panel_rc_.left - 2 * p - refresh_w - S(8), S(200),
+                         panel_rc_.right - panel_rc_.left - 2 * p - refresh_w - 8, 240,
                          SWP_NOZORDER);
-            SetWindowPos(h_refresh_, nullptr, panel_rc_.right - p - refresh_w, y, refresh_w, row,
+            SetWindowPos(h_refresh_, nullptr, panel_rc_.right - p - refresh_w, y, refresh_w,
+                         combo_h, SWP_NOZORDER);
+            y += combo_h + 14;
+
+            const int half = (panel_rc_.right - panel_rc_.left - 2 * p - 10) / 2;
+            res_label_ = {panel_rc_.left + p, y, panel_rc_.left + p + half, y + 18};
+            fps_label_ = {panel_rc_.left + p + half + 10, y, panel_rc_.right - p, y + 18};
+            y += 20;
+            SetWindowPos(h_res_, nullptr, panel_rc_.left + p, y, half, 240, SWP_NOZORDER);
+            SetWindowPos(h_fps_, nullptr, panel_rc_.left + p + half + 10, y, half, 240,
                          SWP_NOZORDER);
-            y += row + S(12);
+            y += combo_h + 16;
 
-            h_res_label_rc_ = {panel_rc_.left + p, y, panel_rc_.right - p, y + S(16)};
-            h_fps_label_rc_ = h_res_label_rc_;
-            y += S(18);
-            const int half = (panel_rc_.right - panel_rc_.left - 2 * p - S(8)) / 2;
-            SetWindowPos(h_res_, nullptr, panel_rc_.left + p, y, half, S(200), SWP_NOZORDER);
-            SetWindowPos(h_fps_, nullptr, panel_rc_.left + p + half + S(8), y, half, S(200),
+            const int btn_w = (panel_rc_.right - panel_rc_.left - 2 * p - 10) / 2;
+            SetWindowPos(h_connect_, nullptr, panel_rc_.left + p, y, btn_w, 32, SWP_NOZORDER);
+            SetWindowPos(h_disconnect_, nullptr, panel_rc_.left + p + btn_w + 10, y, btn_w, 32,
                          SWP_NOZORDER);
-            h_res_label_rc_.right = panel_rc_.left + p + half;
-            h_fps_label_rc_.left = panel_rc_.left + p + half + S(8);
-            y += row + S(12);
+            y += 32 + 18;
 
-            const int btn_w = (panel_rc_.right - panel_rc_.left - 2 * p - S(8)) / 2;
-            SetWindowPos(h_connect_, nullptr, panel_rc_.left + p, y, btn_w, S(30), SWP_NOZORDER);
-            SetWindowPos(h_disconnect_, nullptr, panel_rc_.left + p + btn_w + S(8), y, btn_w,
-                         S(30), SWP_NOZORDER);
-            y += S(30) + S(16);
-
-            info_rc_ = {panel_rc_.left + p, y + S(20), panel_rc_.right - p,
-                        panel_rc_.bottom - S(12)};
+            separator_y_ = y;
+            y += 20;
+            info_top_ = y;
         }
 
-        // Панель сохранения под предпросмотром
+        // --- карточка «Сохранение» ---
         {
-            const int p = S(12);
-            const int row = S(24);
-            const int y = strip_rc_.top + S(10);
-            h_dir_label_rc_ = {strip_rc_.left + p, y, strip_rc_.left + p + S(64), y + row};
-            const int browse_w = S(84);
-            const int edit_x = h_dir_label_rc_.right + S(6);
-            const int edit_w =
-                std::max<int>(S(120), (int)(strip_rc_.right - p - browse_w - S(8) - edit_x));
-            SetWindowPos(h_dir_, nullptr, edit_x, y, edit_w, row, SWP_NOZORDER);
-            SetWindowPos(h_browse_, nullptr, edit_x + edit_w + S(8), y, browse_w, row, SWP_NOZORDER);
+            const int p = 18;
+            const int y1 = save_rc_.top + 22;
+            dir_label_ = {save_rc_.left + p, y1, save_rc_.left + p + 66, y1 + 24};
+            const int browse_w = 84;
+            int edit_x = dir_label_.right + 8;
+            int edit_w = save_rc_.right - p - browse_w - 8 - edit_x;
+            edit_w = std::max(120, edit_w);
+            dir_edit_rc_ = {edit_x, y1, edit_x + edit_w, y1 + 24};
+            SetWindowPos(h_dir_, nullptr, edit_x, y1, edit_w, 24, SWP_NOZORDER);
+            SetWindowPos(h_browse_, nullptr, edit_x + edit_w + 8, y1, browse_w, 24, SWP_NOZORDER);
 
-            const int by = y + row + S(10);
-            const int bh = S(30);
-            int x = strip_rc_.left + p;
-            const int gap = S(8);
-            const int btn_w = (strip_rc_.right - p - x - 3 * gap) / 4;
-            HWND buttons[4] = {h_snapshot_, h_rec_start_, h_rec_stop_, h_open_dir_};
-            for (int i = 0; i < 4; ++i) {
-                const int w = (i == 3) ? std::max<int>(S(110), (int)(strip_rc_.right - p - x))
-                                       : btn_w;
-                SetWindowPos(buttons[i], nullptr, x, by, w, bh, SWP_NOZORDER);
-                x += w + gap;
-            }
+            const int y2 = save_rc_.top + 54;
+            const int gap2 = 10;
+            const int avail = save_rc_.right - p - (save_rc_.left + p) - 3 * gap2;
+            const int w1 = avail * 16 / 100, w2 = avail * 22 / 100, w3 = avail * 24 / 100;
+            int x = save_rc_.left + p;
+            SetWindowPos(h_snapshot_, nullptr, x, y2, w1, 30, SWP_NOZORDER);
+            x += w1 + gap2;
+            SetWindowPos(h_rec_start_, nullptr, x, y2, w2, 30, SWP_NOZORDER);
+            x += w2 + gap2;
+            SetWindowPos(h_rec_stop_, nullptr, x, y2, w3, 30, SWP_NOZORDER);
+            x += w3 + gap2;
+            SetWindowPos(h_report_, nullptr, x, y2, save_rc_.right - p - x, 30, SWP_NOZORDER);
         }
 
-        // Журнал
+        // --- журнал ---
         {
-            const int p = S(10);
-            const int bh = S(26);
-            SetWindowPos(h_report_, nullptr, log_rc_.right - p - S(140), log_rc_.top + p, S(140),
-                         bh, SWP_NOZORDER);
-            SetWindowPos(h_clear_log_, nullptr, log_rc_.right - p - S(140) - S(8) - S(90),
-                         log_rc_.top + p, S(90), bh, SWP_NOZORDER);
-            h_log_title_rc_ = {log_rc_.left + p, log_rc_.top + p, log_rc_.right - S(260),
-                               log_rc_.top + p + bh};
-            const int top = log_rc_.top + p + bh + S(6);
+            const int p = 18;
+            const int top = log_rc_.top + 44;
             SetWindowPos(h_log_, nullptr, log_rc_.left + p, top, log_rc_.right - log_rc_.left - 2 * p,
                          log_rc_.bottom - p - top, SWP_NOZORDER);
-        }
-
-        // Шапка
-        {
-            const int bh = S(28);
-            SetWindowPos(h_tray_, nullptr, rc.right - m - S(150), (header_h - bh) / 2, S(150), bh,
-                         SWP_NOZORDER);
         }
 
         UpdateControlsState();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
+    // -----------------------------------------------------------------------
+    //  Отрисовка
+    // -----------------------------------------------------------------------
     void Paint(HDC dc, const RECT& client) {
-        FillRect(dc, &client, window_brush_);
+        Graphics g(dc);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
-        // ---- шапка ----
-        FillRect(dc, &header_rc_, header_brush_);
-        RECT line = {0, header_rc_.bottom - 1, header_rc_.right, header_rc_.bottom};
-        FillRect(dc, &line, border_brush_);
-        Text(dc, L"Система видеонаблюдения на базе веб-камеры",
-             {S(16), S(8), header_rc_.right / 2, S(32)}, font_title_, ui::kText);
-        Text(dc, L"Лабораторная работа №4 · вариант А5 · скрытый режим фотонаблюдения",
-             {S(16), S(32), header_rc_.right / 2, S(50)}, font_, ui::kTextDim);
+        PaintBg(g, client.right, client.bottom);
+        DrawHeader(g);
+        DrawPreview(g);
+        DrawPanel(g);
+        DrawSave(g);
+        DrawLog(g);
+    }
 
-        // индикатор состояния
-        COLORREF dot = ui::kTextDim;
-        if (camera_.State() == CamState::On) dot = ui::kOk;
-        else if (camera_.State() == CamState::Opening) dot = ui::kWarn;
-        else if (camera_.State() == CamState::Failed) dot = ui::kError;
+    void DrawHeader(Graphics& g) {
+        // Заголовок и подзаголовок — как в ЛР №1 (Segoe UI 26 bold).
+        RECT title_rc{ui::Pad, 18, client_right() - 200, 52};
+        TextG(g, kTitle, title_rc, f_title_, ui::Txt);
 
-        const int status_right = header_rc_.right - S(150) - S(24);
-        const int status_left = std::max<int>(header_rc_.right / 2, status_right - S(330));
-        RECT status_rc = {status_left, S(14), status_right, S(44)};
-        const int cy = (status_rc.top + status_rc.bottom) / 2;
-        Dot(dc, status_rc.left + S(5), cy, S(5), dot);
-        RECT text_rc = status_rc;
-        text_rc.left += S(18);
-        Text(dc, status_text_, text_rc, font_bold_, dot);
+        RECT sub_rc{ui::Pad, 52, client_right() - 200, 74};
+        TextG(g, L"Лабораторная работа №4 · вариант А5 · скрытый режим фотонаблюдения", sub_rc,
+              f_label_, ui::Sub);
 
+        // Индикатор состояния камеры
+        Color state_color = ui::Dim;
+        if (camera_.State() == CamState::On) state_color = ui::Good;
+        else if (camera_.State() == CamState::Opening) state_color = ui::Warn;
+        else if (camera_.State() == CamState::Failed) state_color = ui::Bad;
+
+        const int right = tray_rc_.left - 24;
+        RECT status_rc{right - 420, 30, right, 50};
+        Dot(g, status_rc.left + 5, 40, 5, state_color);
+        RECT text_rc{status_rc.left + 18, 30, right, 50};
+        TextG(g, status_text_, text_rc, f_value_, state_color);
+
+        // Индикатор записи (мигает дважды в секунду)
         if (recorder_.Active()) {
-            RECT rec = {status_left, S(42), status_right, S(56)};
-            if (blink_) Dot(dc, rec.left + S(4), (rec.top + rec.bottom) / 2, S(4), ui::kError);
-            rec.left += S(14);
-            Text(dc, L"ИДЁТ ЗАПИСЬ  " + Clock(recorder_.Seconds()), rec, font_, ui::kError);
+            RECT rec_rc{right - 220, 54, right, 72};
+            if (blink_) Dot(g, rec_rc.left + 4, 63, 4, ui::Bad);
+            TextG(g, L"ЗАПИСЬ " + Clock(recorder_.Seconds()), {rec_rc.left + 14, 54, right, 72},
+                  f_label_, ui::Bad);
         }
+    }
 
-        // ---- предпросмотр ----
-        FillRect(dc, &preview_rc_, preview_brush_);
+    void DrawPreview(Graphics& g) {
+        Card(g, preview_rc_);
+        RECT head{preview_rc_.left + 18, preview_rc_.top + 14, preview_rc_.right - 18,
+                  preview_rc_.top + 38};
+        TextG(g, L"Предпросмотр", head, f_section_, ui::Txt);
+
+        RECT video{preview_rc_.left + 18, preview_rc_.top + 46, preview_rc_.right - 18,
+                   preview_rc_.bottom - 18};
+        Rect(g, video, ui::Preview, ui::Line, 4.0f);
+
         Frame frame;
         if (camera_.Latest(frame)) {
-            const int pw = preview_rc_.right - preview_rc_.left;
-            const int ph = preview_rc_.bottom - preview_rc_.top;
-            const double scale =
-                std::min((double)pw / frame.width, (double)ph / frame.height);
+            const int vw = video.right - video.left - 2;
+            const int vh = video.bottom - video.top - 2;
+            const double scale = std::min((double)vw / frame.width, (double)vh / frame.height);
             const int w = std::max(1, (int)(frame.width * scale));
             const int h = std::max(1, (int)(frame.height * scale));
-            const int x = preview_rc_.left + (pw - w) / 2;
-            const int y = preview_rc_.top + (ph - h) / 2;
+            const int x = video.left + 1 + (vw - w) / 2;
+            const int y = video.top + 1 + (vh - h) / 2;
 
             BITMAPINFO bmi{};
             bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -1124,119 +1182,178 @@ private:
             bmi.bmiHeader.biBitCount = 24;
             bmi.bmiHeader.biCompression = BI_RGB;
 
-            SetStretchBltMode(dc, HALFTONE);
-            SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchDIBits(dc, x, y, w, h, 0, 0, frame.width, frame.height, frame.bgr.data(), &bmi,
+            // Видео выводим обычным GDI: GDI+ не умеет BGR24 напрямую.
+            HDC vdc = g.GetHDC();
+            SetStretchBltMode(vdc, HALFTONE);
+            SetBrushOrgEx(vdc, 0, 0, nullptr);
+            StretchDIBits(vdc, x, y, w, h, 0, 0, frame.width, frame.height, frame.bgr.data(), &bmi,
                           DIB_RGB_COLORS, SRCCOPY);
-
-            // дата и время в кадре
-            const std::wstring stamp = NowStamp(false);
-            RECT box = {x + S(10), y + h - S(30), x + S(240), y + h - S(8)};
-            HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
-            FillRect(dc, &box, black);
-            DeleteObject(black);
-            Text(dc, stamp, box, font_, RGB(235, 235, 235));
+            g.ReleaseHDC(vdc);
         } else {
-            Text(dc, camera_.State() == CamState::Opening ? L"Подключение камеры…"
+            TextG(g, camera_.State() == CamState::Opening ? L"Подключение камеры…"
                                                           : L"Нет видеосигнала",
-                 preview_rc_, font_title_, ui::kTextDim, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                  video, f_section_, ui::Dim, StringAlignmentCenter);
         }
-        FrameRectBorder(dc, preview_rc_);
+    }
 
-        // ---- панель устройства ----
-        FillRect(dc, &panel_rc_, panel_brush_);
-        FrameRectBorder(dc, panel_rc_);
-        Text(dc, L"Камера", {panel_rc_.left + S(12), panel_rc_.top + S(10), panel_rc_.right,
-                             panel_rc_.top + S(32)}, font_bold_, ui::kText);
-        Text(dc, L"Устройство", h_camera_label_rc_, font_, ui::kTextDim);
-        Text(dc, L"Разрешение", h_res_label_rc_, font_, ui::kTextDim);
-        Text(dc, L"Кадров/с", h_fps_label_rc_, font_, ui::kTextDim);
+    void DrawPanel(Graphics& g) {
+        Card(g, panel_rc_);
+        RECT head{panel_rc_.left + 18, panel_rc_.top + 14, panel_rc_.right - 18,
+                  panel_rc_.top + 38};
+        TextG(g, L"Камера", head, f_section_, ui::Txt);
 
-        RECT info_title = {info_rc_.left, info_rc_.top - S(20), info_rc_.right, info_rc_.top};
-        Text(dc, L"Информация", info_title, font_bold_, ui::kText);
-        const std::wstring lines[][2] = {
-            {L"Устройство", camera_name_},
-            {L"Разрешение", resolution_text_},
-            {L"Формат", format_text_},
-            {L"Кадров", frames_text_},
-            {L"Запись", record_text_},
-        };
-        int y = info_rc_.top + S(4);
-        for (const auto& line : lines) {
-            RECT name_rc = {info_rc_.left, y, info_rc_.left + S(96), y + S(18)};
-            RECT value_rc = {name_rc.right, y, info_rc_.right, y + S(18)};
-            Text(dc, line[0], name_rc, font_, ui::kTextDim);
-            Text(dc, line[1].empty() ? L"—" : line[1], value_rc, font_, ui::kText);
-            y += S(20);
+        TextG(g, L"Устройство", camera_label_, f_label_, ui::Sub);
+        TextG(g, L"Разрешение", res_label_, f_label_, ui::Sub);
+        TextG(g, L"Кадров/с", fps_label_, f_label_, ui::Sub);
+
+        Separator(g, panel_rc_, separator_y_, 18);
+
+        int y = info_top_;
+        Row(g, panel_rc_, y, L"Режим:", mode_text_.empty() ? L"—" : mode_text_, f_label_,
+            f_value_, ui::Txt);
+        y += ui::RowH;
+        Row(g, panel_rc_, y, L"Формат:", format_text_.empty() ? L"—" : format_text_, f_label_,
+            f_value_, ui::Txt);
+        y += ui::RowH;
+        Row(g, panel_rc_, y, L"Кадров:", frames_text_.empty() ? L"—" : frames_text_, f_label_,
+            f_value_, ui::Txt);
+        y += ui::RowH;
+        Row(g, panel_rc_, y, L"Запись:", recorder_.Active()
+                                             ? L"идёт, " + Clock(recorder_.Seconds())
+                                             : L"нет",
+            f_label_, f_value_, recorder_.Active() ? ui::Bad : ui::Sub);
+
+        // Подсказка про скрытый режим — внизу карточки
+        RECT hint{panel_rc_.left + 18, panel_rc_.bottom - 62, panel_rc_.right - 18,
+                  panel_rc_.bottom - 44};
+        TextG(g, L"Скрытый режим:", hint, f_label_, ui::Sub);
+        RECT hint2{panel_rc_.left + 18, panel_rc_.bottom - 44, panel_rc_.right - 18,
+                   panel_rc_.bottom - 26};
+        TextG(g, L"«Свернуть в трей» + Ctrl+Shift+F12", hint2, f_label_, ui::Sub);
+    }
+
+    void DrawSave(Graphics& g) {
+        Card(g, save_rc_);
+        RECT head{save_rc_.left + 18, save_rc_.top + 2, save_rc_.right - 18, save_rc_.top + 22};
+        TextG(g, L"Сохранение материалов", head, f_section_, ui::Txt);
+        TextG(g, L"Каталог", dir_label_, f_label_, ui::Sub);
+
+        // Рамка вокруг поля ввода: EDIT не имеет своего оформления.
+        RECT field = dir_edit_rc_;
+        field.left -= 1;
+        field.top -= 1;
+        field.right += 1;
+        field.bottom += 1;
+        Rect(g, field, Color(255, 12, 18, 30), ui::Line, 4.0f);
+    }
+
+    void DrawLog(Graphics& g) {
+        Card(g, log_rc_);
+        RECT head{log_rc_.left + 18, log_rc_.top + 12, log_rc_.right - 18, log_rc_.top + 34};
+        TextG(g, L"Журнал событий", head, f_section_, ui::Txt);
+    }
+
+    // Кнопка: скруглённая плашка в стиле карточек.
+    void DrawButton(const DRAWITEMSTRUCT* dis) {
+        Graphics g(dis->hDC);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+
+        const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+        const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+
+        Color fill = ui::Btn, border = ui::Line, text = ui::Txt;
+        if (disabled) {
+            fill = Color(120, 24, 32, 48);
+            border = Color(90, 60, 80, 110);
+            text = ui::Dim;
+        } else if (dis->CtlID == ID_CONNECT || dis->CtlID == ID_SNAPSHOT) {
+            fill = pressed ? Color(255, 30, 130, 90) : Color(255, 24, 110, 74);
+            border = Color(255, 60, 200, 140);
+            text = Color(255, 235, 255, 245);
+        } else if (dis->CtlID == ID_REC_STOP) {
+            fill = pressed ? Color(255, 120, 45, 45) : Color(255, 88, 34, 38);
+            border = Color(255, 190, 70, 70);
+            text = ui::Bad;
+        } else if (pressed) {
+            fill = ui::BtnHot;
         }
 
-        // ---- панель сохранения ----
-        FillRect(dc, &strip_rc_, panel_brush_);
-        FrameRectBorder(dc, strip_rc_);
-        Text(dc, L"Сохранение", {strip_rc_.left + S(12), strip_rc_.top + S(6), strip_rc_.right,
-                                 strip_rc_.top + S(24)}, font_bold_, ui::kText);
-        Text(dc, L"Каталог", h_dir_label_rc_, font_, ui::kTextDim);
+        RECT rc = dis->rcItem;
+        Rect(g, rc, fill, border, 5.0f);
 
-        // ---- журнал ----
-        FillRect(dc, &log_rc_, panel_brush_);
-        FrameRectBorder(dc, log_rc_);
-        Text(dc, L"Журнал событий", h_log_title_rc_, font_bold_, ui::kText);
+        wchar_t text_buffer[128] = {};
+        GetWindowTextW(dis->hwndItem, text_buffer, 128);
+        TextG(g, text_buffer, rc, f_button_, text, StringAlignmentCenter);
     }
 
-    void Dot(HDC dc, int cx, int cy, int radius, COLORREF color) {
-        HBRUSH brush = CreateSolidBrush(color);
-        HPEN pen = CreatePen(PS_SOLID, 1, color);
-        HGDIOBJ old_brush = SelectObject(dc, brush);
-        HGDIOBJ old_pen = SelectObject(dc, pen);
-        Ellipse(dc, cx - radius, cy - radius, cx + radius, cy + radius);
-        SelectObject(dc, old_pen);
-        SelectObject(dc, old_brush);
-        DeleteObject(pen);
-        DeleteObject(brush);
+    // Выпадающий список: поле выбора (itemID == -1) и пункты списка.
+    void DrawCombo(const DRAWITEMSTRUCT* dis) {
+        Graphics g(dis->hDC);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+
+        if (dis->itemID == (UINT)-1) {
+            Rect(g, dis->rcItem, ui::Field, ui::Line, 4.0f);
+            const int sel = (int)SendMessageW(dis->hwndItem, CB_GETCURSEL, 0, 0);
+            std::wstring text;
+            if (sel >= 0) {
+                wchar_t buffer[256] = {};
+                if (SendMessageW(dis->hwndItem, CB_GETLBTEXT, sel, (LPARAM)buffer) != CB_ERR) {
+                    text = buffer;
+                }
+            }
+            RECT text_rc = dis->rcItem;
+            text_rc.left += 8;
+            text_rc.right -= 24;
+            TextG(g, text, text_rc, f_label_, text.empty() ? ui::Dim : ui::Txt);
+
+            // «Галочка» выпадающего списка
+            const int cx = dis->rcItem.right - 14, cy = (dis->rcItem.top + dis->rcItem.bottom) / 2;
+            Pen pen(ui::Sub, 1.4f);
+            g.DrawLine(&pen, cx - 4, cy - 2, cx, cy + 2);
+            g.DrawLine(&pen, cx, cy + 2, cx + 4, cy - 2);
+            return;
+        }
+
+        wchar_t buffer[256] = {};
+        SendMessageW(dis->hwndItem, CB_GETLBTEXT, dis->itemID, (LPARAM)buffer);
+        const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+        FillRectG(g, dis->rcItem, selected ? ui::BtnHot : ui::Field);
+        RECT text_rc = dis->rcItem;
+        text_rc.left += 8;
+        TextG(g, buffer, text_rc, f_label_, selected ? ui::Txt : ui::Sub);
     }
 
-    void FrameRectBorder(HDC dc, const RECT& rc) {
-        HPEN pen = CreatePen(PS_SOLID, 1, ui::kBorder);
-        HGDIOBJ old_pen = SelectObject(dc, pen);
-        HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        Rectangle(dc, rc.left, rc.top, rc.right, rc.bottom);
-        SelectObject(dc, old_brush);
-        SelectObject(dc, old_pen);
-        DeleteObject(pen);
-    }
+    void DrawLogItem(const DRAWITEMSTRUCT* dis) {
+        Graphics g(dis->hDC);
+        g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
 
-    void Text(HDC dc, const std::wstring& text, RECT rc, HFONT font, COLORREF color,
-              UINT format = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS) {
-        HGDIOBJ old_font = SelectObject(dc, font);
-        const int old_mode = SetBkMode(dc, TRANSPARENT);
-        const COLORREF old_color = SetTextColor(dc, color);
-        DrawTextW(dc, text.c_str(), (int)text.size(), &rc, format | DT_NOPREFIX);
-        SetTextColor(dc, old_color);
-        SetBkMode(dc, old_mode);
-        SelectObject(dc, old_font);
-    }
-
-    void DrawLogItem(DRAWITEMSTRUCT* dis) {
         wchar_t buffer[1024] = {};
         SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, (LPARAM)buffer);
         const std::wstring line(buffer);
-        const bool selected = (dis->itemState & ODS_SELECTED) != 0;
-        HBRUSH bg = CreateSolidBrush(selected ? RGB(232, 240, 250) : ui::kLogBg);
-        FillRect(dis->hDC, &dis->rcItem, bg);
-        DeleteObject(bg);
+
+        FillRectG(g, dis->rcItem, Color(255, 14, 20, 34));
 
         const LogLevel level = (LogLevel)SendMessageW(dis->hwndItem, LB_GETITEMDATA, dis->itemID, 0);
-        const size_t time_len = 23;   // "29.10.2026 18:30:12.123"
+        const size_t time_len = 23;   // «29.10.2026 22:15:03.120»
+
         RECT rc = dis->rcItem;
-        rc.left += S(6);
+        rc.left += 8;
         RECT time_rc = rc;
-        time_rc.right = rc.left + S(150);
-        Text(dis->hDC, line.substr(0, std::min(time_len, line.size())), time_rc, font_mono_,
-             ui::kTextDim);
+        time_rc.right = rc.left + 152;
+        TextG(g, line.substr(0, std::min(time_len, line.size())), time_rc, f_log_, ui::Dim);
+
         RECT text_rc = rc;
         text_rc.left = time_rc.right;
-        Text(dis->hDC, line.size() > time_len ? line.substr(time_len) : L"", text_rc, font_mono_,
-             LevelColor(level));
+        TextG(g, line.size() > time_len ? line.substr(time_len) : L"", text_rc, f_log_,
+              LevelColor(level));
+    }
+
+    int client_right() const {
+        RECT rc;
+        GetClientRect(hwnd_, &rc);
+        return rc.right;
     }
 
     std::wstring Clock(double seconds) const {
@@ -1253,8 +1370,7 @@ private:
         if (log_.size() > 2000) log_.erase(log_.begin());
 
         if (h_log_) {
-            const int index =
-                (int)SendMessageW(h_log_, LB_ADDSTRING, 0, (LPARAM)line.c_str());
+            const int index = (int)SendMessageW(h_log_, LB_ADDSTRING, 0, (LPARAM)line.c_str());
             if (index >= 0) {
                 SendMessageW(h_log_, LB_SETITEMDATA, index, (LPARAM)level);
                 SendMessageW(h_log_, LB_SETTOPINDEX, index, 0);
@@ -1264,10 +1380,9 @@ private:
             }
         }
 
-        // Дублируем в файл, чтобы журнал сохранялся даже при аварийном закрытии.
-        if (!settings_.save_dir.empty()) {
-            const std::wstring path = JoinPath(settings_.save_dir, L"camera_log.txt");
-            HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+        // Дублируем в файл: журнал сохраняется даже при аварийном закрытии.
+        if (!save_dir_.empty()) {
+            HANDLE h = CreateFileW(JoinPath(save_dir_, L"camera_log.txt").c_str(), FILE_APPEND_DATA,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
                                    FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h != INVALID_HANDLE_VALUE) {
@@ -1295,8 +1410,7 @@ private:
         }
 
         if (!devices_.empty()) {
-            const int index = std::clamp(settings_.device, 0, (int)devices_.size() - 1);
-            SendMessageW(h_camera_, CB_SETCURSEL, index, 0);
+            SendMessageW(h_camera_, CB_SETCURSEL, 0, 0);
             if (!initial) {
                 AddLog(LogLevel::Info,
                        Format(L"Список камер обновлён: найдено %d", (int)devices_.size()));
@@ -1304,9 +1418,9 @@ private:
         } else {
             SendMessageW(h_camera_, CB_SETCURSEL, (WPARAM)-1, 0);
             AddLog(LogLevel::Warn,
-                   L"Камеры не найдены. Проверьте подключение и разрешение доступа к камере "
-                   L"(Параметры → Конфиденциальность → Камера)");
+                   L"Камеры не найдены: проверьте подключение и доступ к камере в Windows");
         }
+
         UpdateControlsState();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1315,22 +1429,17 @@ private:
         if (camera_.State() == CamState::On || camera_.State() == CamState::Opening) return;
         if (devices_.empty()) return;
 
-        const int selected = (int)SendMessageW(h_camera_, CB_GETCURSEL, 0, 0);
-        const int index = std::clamp(selected, 0, (int)devices_.size() - 1);
-        const int res = std::clamp((int)SendMessageW(h_res_, CB_GETCURSEL, 0, 0), 0,
-                                   (int)std::size(kResolutions) - 1);
-        const int fps = std::clamp((int)SendMessageW(h_fps_, CB_GETCURSEL, 0, 0), 0,
-                                   (int)std::size(kFpsValues) - 1);
-
-        settings_.device = index;
-        settings_.resolution = res;
-        settings_.fps = fps;
-        SaveSettings();
+        int index = (int)SendMessageW(h_camera_, CB_GETCURSEL, 0, 0);
+        index = std::clamp(index, 0, (int)devices_.size() - 1);
+        int res = (int)SendMessageW(h_res_, CB_GETCURSEL, 0, 0);
+        res = std::clamp(res, 0, (int)std::size(kResTitles) - 1);
+        int fps = (int)SendMessageW(h_fps_, CB_GETCURSEL, 0, 0);
+        fps = std::clamp(fps, 0, (int)std::size(kFpsValues) - 1);
 
         status_text_ = L"Подключение камеры…";
         AddLog(LogLevel::Info,
-               Format(L"Подключение «%s» (%dx%d, %.0f к/с)", devices_[index].name.c_str(),
-                      kResW[res], kResH[res], kFpsValues[fps]));
+               Format(L"Подключение «%s» (%s, %.0f к/с)", devices_[index].name.c_str(),
+                      kResTitles[res], kFpsValues[fps]));
         camera_.Start(index, kResW[res], kResH[res], kFpsValues[fps]);
         UpdateControlsState();
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1338,11 +1447,9 @@ private:
 
     void Disconnect() {
         if (recorder_.Active()) StopRecording();
-        const bool was_active = camera_.State() == CamState::On ||
-                                camera_.State() == CamState::Opening;
         camera_.Stop();
         status_text_ = L"Камера не подключена";
-        if (was_active) AddLog(LogLevel::Info, L"Захват остановлен");
+        AddLog(LogLevel::Info, L"Захват остановлен");
         UpdateControlsState();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1370,15 +1477,12 @@ private:
         if (dir.empty()) dir = DefaultSaveDir();
 
         if (!EnsureDir(dir)) {
-            AddLog(LogLevel::Error, L"Не удалось создать каталог: " + dir);
-            dir = JoinPath(ModuleDir(), L"snapshots");
+            dir = DefaultSaveDir();
             EnsureDir(dir);
             SetWindowTextW(h_dir_, dir.c_str());
+            AddLog(LogLevel::Error, L"Не удалось создать каталог, выбран каталог по умолчанию");
         }
-        if (dir != settings_.save_dir) {
-            settings_.save_dir = dir;
-            SaveSettings();
-        }
+        save_dir_ = dir;
     }
 
     void TakeSnapshot(bool background) {
@@ -1391,51 +1495,41 @@ private:
             return;
         }
 
-        const std::wstring path = UniquePath(settings_.save_dir, L"snapshot", L"jpg");
-        cv::Mat mat(frame.height, frame.width, CV_8UC3, frame.bgr.data());
+        const std::wstring path = UniquePath(save_dir_, L"snapshot", L"jpg");
+        Mat mat(frame.height, frame.width, CV_8UC3, frame.bgr.data());
         if (!ImwriteAny(path, mat, 92)) {
             AddLog(LogLevel::Error, L"Не удалось сохранить снимок: " + FileName(path));
             Balloon(L"Ошибка", L"Не удалось сохранить снимок", NIIF_ERROR);
             return;
         }
 
-        const std::wstring size = Format(L"%.1f КБ", (double)FileSize(path) / 1024.0);
         AddLog(background ? LogLevel::Background : LogLevel::Info,
-               Format(L"Снимок сохранён: %s (%dx%d, %s)", FileName(path).c_str(), frame.width,
-                      frame.height, size.c_str()));
+               Format(L"Снимок сохранён: %s (%d × %d, %.1f КБ)", FileName(path).c_str(),
+                      frame.width, frame.height, (double)FileSize(path) / 1024.0));
         Balloon(background ? L"Снимок (скрытый режим)" : L"Снимок сохранён",
-                FileName(path) + L"\n" + settings_.save_dir, NIIF_INFO);
+                FileName(path) + L"\n" + save_dir_, NIIF_INFO);
     }
 
     void StartRecording() {
-        if (recorder_.Active()) return;
-        if (camera_.State() != CamState::On) {
-            AddLog(LogLevel::Warn, L"Запись невозможна: камера не подключена");
-            return;
-        }
+        if (recorder_.Active() || camera_.State() != CamState::On) return;
         ApplyDirectory();
 
         Frame frame;
-        if (!camera_.Latest(frame)) {
-            AddLog(LogLevel::Warn, L"Запись невозможна: нет кадра");
-            return;
-        }
+        if (!camera_.Latest(frame)) return;
 
         double fps = camera_.MeasuredFps();
         if (fps < 1.0) fps = camera_.DeclaredFps();
         if (fps < 1.0) fps = 25.0;
 
-        const std::wstring path = UniquePath(settings_.save_dir, L"video", L"avi");
+        const std::wstring path = UniquePath(save_dir_, L"video", L"avi");
         if (!recorder_.Start(path, frame.width, frame.height, fps)) {
             AddLog(LogLevel::Error, L"Не удалось открыть файл записи: " + FileName(path));
-            Balloon(L"Ошибка записи", FileName(path), NIIF_ERROR);
             return;
         }
-
         AddLog(LogLevel::Info,
-               Format(L"Запись начата: %s (%dx%d, %.0f к/с, MJPEG/AVI)", FileName(path).c_str(),
+               Format(L"Запись начата: %s (%d × %d, %.0f к/с)", FileName(path).c_str(),
                       frame.width, frame.height, fps));
-        if (Hidden()) Balloon(L"Запись начата", FileName(path), NIIF_INFO);
+        if (hidden_) Balloon(L"Запись начата", FileName(path), NIIF_INFO);
         UpdateControlsState();
     }
 
@@ -1450,14 +1544,13 @@ private:
                Format(L"Запись завершена: %s (кадров %llu, %s, %.1f МБ)", FileName(path).c_str(),
                       frames, Clock(seconds).c_str(),
                       (double)FileSize(path) / (1024.0 * 1024.0)));
-        if (Hidden()) Balloon(L"Запись остановлена", FileName(path), NIIF_INFO);
+        if (hidden_) Balloon(L"Запись остановлена", FileName(path), NIIF_INFO);
         UpdateControlsState();
     }
 
     void SaveReport() {
         ApplyDirectory();
-        const std::wstring path =
-            JoinPath(settings_.save_dir, L"report_" + FileStamp() + L".txt");
+        const std::wstring path = JoinPath(save_dir_, L"report_" + FileStamp() + L".txt");
 
         std::wstring text;
         text += L"ЛР №4. Система видеонаблюдения. Вариант А5 (скрытый режим фотонаблюдения)\r\n";
@@ -1480,7 +1573,7 @@ private:
         CloseHandle(h);
 
         AddLog(LogLevel::Info, L"Отчёт сохранён: " + FileName(path));
-        Balloon(L"Отчёт сохранён", FileName(path) + L"\n" + settings_.save_dir, NIIF_INFO);
+        Balloon(L"Отчёт сохранён", FileName(path) + L"\n" + save_dir_, NIIF_INFO);
     }
 
     // -----------------------------------------------------------------------
@@ -1493,13 +1586,15 @@ private:
         data.uID = 1;
         data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         data.uCallbackMessage = WM_TRAY;
-        data.hIcon = tray_icon_;
+        data.hIcon = (HICON)LoadImageW(inst_, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0,
+                                       LR_DEFAULTSIZE | LR_SHARED);
+        if (!data.hIcon) data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
         wcscpy_s(data.szTip, L"Видеонаблюдение — ЛР №4, вариант А5");
         tray_added_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
     }
 
     void HideToTray() {
-        // Если камера не подключена — подключаем: иначе фоновый снимок невозможен.
+        // Без открытой камеры фоновый снимок невозможен — подключаем автоматически.
         if (camera_.State() != CamState::On && !devices_.empty()) {
             AddLog(LogLevel::Background, L"Фоновый режим: подключаю камеру автоматически");
             Connect();
@@ -1524,8 +1619,6 @@ private:
         }
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
-
-    bool Hidden() const { return hidden_; }
 
     void OnHotkey() {
         if (hidden_) AddLog(LogLevel::Background, L"Горячая клавиша Ctrl+Shift+F12 (скрытый режим)");
@@ -1572,7 +1665,7 @@ private:
     }
 
     // -----------------------------------------------------------------------
-    //  Прочее: команды, таймер, настройки, завершение
+    //  Команды, таймер, завершение
     // -----------------------------------------------------------------------
     void OnCommand(int id, int code) {
         switch (id) {
@@ -1597,22 +1690,8 @@ private:
             case ID_BROWSE:
                 if (code == BN_CLICKED) BrowseDirectory();
                 break;
-            case ID_OPEN_DIR:
-                if (code == BN_CLICKED) {
-                    ApplyDirectory();
-                    ShellExecuteW(hwnd_, L"open", settings_.save_dir.c_str(), nullptr, nullptr,
-                                  SW_SHOWNORMAL);
-                }
-                break;
             case ID_REPORT:
                 if (code == BN_CLICKED) SaveReport();
-                break;
-            case ID_CLEAR_LOG:
-                if (code == BN_CLICKED) {
-                    log_.clear();
-                    SendMessageW(h_log_, LB_RESETCONTENT, 0, 0);
-                    AddLog(LogLevel::Info, L"Журнал очищен");
-                }
                 break;
             case ID_TRAY_BUTTON:
                 if (code == BN_CLICKED) HideToTray();
@@ -1626,44 +1705,26 @@ private:
             case ID_MENU_EXIT:
                 OnClose();
                 break;
-            case ID_DIR:
-                if (code == EN_CHANGE) {
-                    wchar_t buffer[MAX_PATH * 2] = {};
-                    GetWindowTextW(h_dir_, buffer, (int)std::size(buffer));
-                    settings_.save_dir = buffer;
-                }
-                break;
             default:
                 break;
         }
     }
 
     void OnTimer() {
-        blink_ = !blink_;
+        blink_ = !blink_;   // индикатор записи мигает дважды в секунду
 
         Frame frame;
-        if (devices_.empty()) {
-            camera_name_ = L"не найдена";
-        } else {
-            int selected = (int)SendMessageW(h_camera_, CB_GETCURSEL, 0, 0);
-            selected = std::clamp(selected, 0, (int)devices_.size() - 1);
-            camera_name_ = devices_[selected].name;
-        }
-
         if (camera_.Latest(frame)) {
             const double fps = camera_.MeasuredFps();
-            resolution_text_ = Format(L"%d × %d%s", frame.width, frame.height,
-                                      fps > 0.5 ? Format(L", %.0f к/с", fps).c_str() : L"");
+            mode_text_ = Format(L"%d × %d", frame.width, frame.height);
+            if (fps > 0.5) mode_text_ += Format(L", %.0f к/с", fps);
             format_text_ = camera_.FormatName();
             frames_text_ = Format(L"%llu", camera_.FrameCount());
         } else {
-            resolution_text_.clear();
+            mode_text_.clear();
             format_text_.clear();
             frames_text_.clear();
         }
-        record_text_ = recorder_.Active()
-                           ? Format(L"идёт, %s", Clock(recorder_.Seconds()).c_str())
-                           : L"нет";
 
         UpdateControlsState();
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1676,8 +1737,8 @@ private:
         const bool has_devices = !devices_.empty();
 
         EnableWindow(h_connect_, (!on && !opening && has_devices) ? TRUE : FALSE);
-        EnableWindow(h_disconnect_, (on || opening || camera_.State() == CamState::Failed) ? TRUE
-                                                                                          : FALSE);
+        EnableWindow(h_disconnect_,
+                     (on || opening || camera_.State() == CamState::Failed) ? TRUE : FALSE);
         EnableWindow(h_camera_, (!on && !opening) ? TRUE : FALSE);
         EnableWindow(h_refresh_, (!on && !opening) ? TRUE : FALSE);
         EnableWindow(h_res_, (!on && !opening) ? TRUE : FALSE);
@@ -1712,7 +1773,6 @@ private:
             if (answer != IDYES) return;
             StopRecording();
         }
-        SaveSettings();
         DestroyWindow(hwnd_);
     }
 
@@ -1738,128 +1798,68 @@ private:
             tray_added_ = false;
         }
 
-        for (HBRUSH* brush : {&panel_brush_, &log_brush_, &window_brush_, &header_brush_,
-                              &border_brush_, &preview_brush_}) {
-            if (*brush) DeleteObject(*brush);
-            *brush = nullptr;
+        for (Font** font : {&f_title_, &f_section_, &f_label_, &f_value_, &f_button_, &f_log_}) {
+            delete *font;
+            *font = nullptr;
         }
-        if (font_) DeleteObject(font_);
-        if (font_bold_) DeleteObject(font_bold_);
-        if (font_title_) DeleteObject(font_title_);
-        if (font_mono_) DeleteObject(font_mono_);
-        font_ = font_bold_ = font_title_ = font_mono_ = nullptr;
-    }
-
-    struct Settings {
-        std::wstring save_dir;   // заполняется в OnCreate (после CoInitialize)
-        int device = 0;
-        int resolution = 1;
-        int fps = 0;
-        bool minimize_to_tray = false;
-    };
-
-    void LoadSettings() {
-        HKEY key = nullptr;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Lab4Camera", 0, KEY_READ, &key) !=
-            ERROR_SUCCESS) {
-            return;
+        if (field_brush_) {
+            DeleteObject(field_brush_);
+            field_brush_ = nullptr;
         }
-        wchar_t buffer[MAX_PATH * 2] = {};
-        DWORD size = sizeof(buffer);
-        DWORD type = 0;
-        if (RegQueryValueExW(key, L"SaveDir", nullptr, &type, (LPBYTE)buffer, &size) ==
-                ERROR_SUCCESS &&
-            type == REG_SZ && buffer[0]) {
-            settings_.save_dir = buffer;
-        }
-        auto read_dword = [&](const wchar_t* name, int* value, bool* flag) {
-            DWORD data = 0;
-            DWORD data_size = sizeof(data);
-            DWORD data_type = 0;
-            if (RegQueryValueExW(key, name, nullptr, &data_type, (LPBYTE)&data, &data_size) ==
-                    ERROR_SUCCESS &&
-                data_type == REG_DWORD) {
-                if (value) *value = (int)data;
-                if (flag) *flag = data != 0;
-            }
-        };
-        read_dword(L"Device", &settings_.device, nullptr);
-        read_dword(L"Resolution", &settings_.resolution, nullptr);
-        read_dword(L"Fps", &settings_.fps, nullptr);
-        read_dword(L"MinimizeToTray", nullptr, &settings_.minimize_to_tray);
-        RegCloseKey(key);
-        minimize_to_tray_ = settings_.minimize_to_tray;
-    }
-
-    void SaveSettings() {
-        HKEY key = nullptr;
-        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Lab4Camera", 0, nullptr, 0, KEY_WRITE,
-                            nullptr, &key, nullptr) != ERROR_SUCCESS) {
-            return;
-        }
-        RegSetValueExW(key, L"SaveDir", 0, REG_SZ, (const BYTE*)settings_.save_dir.c_str(),
-                       (DWORD)((settings_.save_dir.size() + 1) * sizeof(wchar_t)));
-        auto write_dword = [&](const wchar_t* name, int value) {
-            DWORD data = (DWORD)value;
-            RegSetValueExW(key, name, 0, REG_DWORD, (const BYTE*)&data, sizeof(data));
-        };
-        write_dword(L"Device", settings_.device);
-        write_dword(L"Resolution", settings_.resolution);
-        write_dword(L"Fps", settings_.fps);
-        write_dword(L"MinimizeToTray", minimize_to_tray_ ? 1 : 0);
-        RegCloseKey(key);
     }
 
     // --- поля --------------------------------------------------------------
     HINSTANCE inst_ = nullptr;
     HWND hwnd_ = nullptr;
-    int dpi_ = 96;
     bool cleaned_ = false;
 
-    HFONT font_ = nullptr, font_bold_ = nullptr, font_title_ = nullptr, font_mono_ = nullptr;
-    HBRUSH panel_brush_ = nullptr, log_brush_ = nullptr, window_brush_ = nullptr,
-           header_brush_ = nullptr, border_brush_ = nullptr, preview_brush_ = nullptr;
+    Font* f_title_ = nullptr;
+    Font* f_section_ = nullptr;
+    Font* f_label_ = nullptr;
+    Font* f_value_ = nullptr;
+    Font* f_button_ = nullptr;
+    Font* f_log_ = nullptr;
+    HBRUSH field_brush_ = nullptr;
 
     HWND h_camera_ = nullptr, h_refresh_ = nullptr, h_res_ = nullptr, h_fps_ = nullptr;
     HWND h_connect_ = nullptr, h_disconnect_ = nullptr;
     HWND h_snapshot_ = nullptr, h_rec_start_ = nullptr, h_rec_stop_ = nullptr;
-    HWND h_dir_ = nullptr, h_browse_ = nullptr, h_open_dir_ = nullptr;
-    HWND h_report_ = nullptr, h_clear_log_ = nullptr, h_tray_ = nullptr, h_log_ = nullptr;
+    HWND h_dir_ = nullptr, h_browse_ = nullptr, h_report_ = nullptr;
+    HWND h_tray_ = nullptr, h_log_ = nullptr;
 
-    RECT header_rc_{}, preview_rc_{}, panel_rc_{}, strip_rc_{}, log_rc_{}, info_rc_{};
-    RECT h_camera_label_rc_{}, h_res_label_rc_{}, h_fps_label_rc_{}, h_dir_label_rc_{},
-        h_log_title_rc_{};
+    RECT preview_rc_{}, panel_rc_{}, save_rc_{}, log_rc_{}, tray_rc_{};
+    RECT camera_label_{}, res_label_{}, fps_label_{}, dir_label_{}, dir_edit_rc_{};
+    int separator_y_ = 0;
+    int info_top_ = 0;
 
     Camera camera_;
     Recorder recorder_;
     std::vector<CameraDevice> devices_;
     std::vector<LogEntry> log_;
 
-    Settings settings_;
+    std::wstring save_dir_;
     std::wstring status_text_ = L"Камера не подключена";
-    std::wstring camera_name_ = L"не найдена";
-    std::wstring resolution_text_;
-    std::wstring format_text_;
-    std::wstring frames_text_;
-    std::wstring record_text_ = L"нет";
+    std::wstring mode_text_, format_text_, frames_text_;
 
     bool tray_added_ = false;
     bool hotkey_ok_ = false;
     bool hidden_ = false;
-    bool minimize_to_tray_ = false;
     bool blink_ = false;
-
-    HICON tray_icon_ = nullptr;
 };
 
 }  // namespace
 
 // ===========================================================================
-//  Точка входа
+//  8. Точка входа
 // ===========================================================================
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
+    // GDI+ — основа оформления (как в ЛР №1).
+    GdiplusStartupInput gdiplus_input;
+    ULONG_PTR gdiplus_token = 0;
+    if (GdiplusStartup(&gdiplus_token, &gdiplus_input, nullptr) != Ok) return 1;
+
     // COM нужен для DirectShow (перечисление камер) и диалога выбора каталога.
-    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     INITCOMMONCONTROLSEX controls{};
     controls.dwSize = sizeof(controls);
@@ -1868,6 +1868,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
 
     int result = 0;
     {
+        g_bg = LoadBg(inst);
         App app;
         if (!app.Init(inst, show)) {
             MessageBoxW(nullptr, L"Не удалось создать окно приложения.", L"Ошибка",
@@ -1876,8 +1877,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
         } else {
             result = app.Run();
         }
+        delete g_bg;
+        g_bg = nullptr;
     }
 
-    if (SUCCEEDED(hr)) CoUninitialize();
+    if (SUCCEEDED(com)) CoUninitialize();
+    GdiplusShutdown(gdiplus_token);
     return result;
 }
