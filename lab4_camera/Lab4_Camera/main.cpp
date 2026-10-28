@@ -283,7 +283,6 @@ public:
 
     CamState State() const { return state_.load(); }
     double MeasuredFps() const { return measured_fps_.load(); }
-    unsigned long long FrameCount() const { return frame_count_.load(); }
     std::wstring FormatName() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return format_;
@@ -379,7 +378,6 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 latest_ = std::move(out);
             }
-            frame_count_.fetch_add(1);
 
             ++fps_frames;
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -417,7 +415,6 @@ private:
     std::wstring format_;
 
     std::atomic<double> measured_fps_{0.0};
-    std::atomic<unsigned long long> frame_count_{0};
 };
 
 // ===========================================================================
@@ -439,11 +436,6 @@ const double kFpsValues[] = {30.0, 25.0, 20.0, 15.0, 10.0};
 // опрашивается таймером: 25 мс достаточно, чтобы реакция была мгновенной,
 // и при этом приложение не тратит заметного времени.
 const UINT kChordPollMs = 25;
-
-struct LogEntry {
-    int level;   // 0 — информация, 1 — предупреждение, 2 — ошибка, 3 — фоновый режим
-    std::wstring text;
-};
 
 class App {
 public:
@@ -680,7 +672,6 @@ private:
         AddLog(0, L"Снимок — нажать «-» и «=» одновременно (работает из любого окна)");
         AddLog(0, alt_hotkey_ok_ ? L"Резервная комбинация Ctrl+Shift+F12 свободна"
                                  : L"Ctrl+Shift+F12 занята другим приложением");
-        AddLog(3, L"Свернуть в трей — кнопкой в шапке окна");
 
         RefreshDevices(true);
         view_.Layout();
@@ -692,7 +683,7 @@ private:
     // -----------------------------------------------------------------------
     void AddLog(int level, const std::wstring& text) {
         const std::wstring line = NowStamp(true) + L"  " + text;
-        log_.push_back({level, line});
+        log_.push_back(line);
         if (log_.size() > 2000) log_.erase(log_.begin());
 
         view_.AddLogLine(line, level);
@@ -836,7 +827,7 @@ private:
         text += L"ЛР №4. Система видеонаблюдения. Вариант А5 (скрытый режим фотонаблюдения)\r\n";
         text += L"Отчёт сформирован: " + NowStamp(false) + L"\r\n";
         text += std::wstring(78, L'=') + L"\r\n\r\n";
-        for (const auto& entry : log_) text += entry.text + L"\r\n";
+        for (const auto& line : log_) text += line + L"\r\n";
         if (log_.empty()) text += L"(журнал пуст)\r\n";
 
         HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
@@ -1012,11 +1003,9 @@ private:
             model_.mode = Format(L"%d × %d", frame.width, frame.height);
             if (fps > 0.5) model_.mode += Format(L", %.0f к/с", fps);
             model_.format = camera_.FormatName();
-            model_.frames = Format(L"%llu", camera_.FrameCount());
         } else {
             model_.mode.clear();
             model_.format.clear();
-            model_.frames.clear();
         }
 
         UpdateModel();
@@ -1084,7 +1073,7 @@ private:
 
     Camera camera_;
     std::vector<CameraDevice> devices_;
-    std::vector<LogEntry> log_;
+    std::vector<std::wstring> log_;   // строки журнала для отчёта
 
     std::wstring save_dir_;
     std::wstring status_text_ = L"Камера не подключена";

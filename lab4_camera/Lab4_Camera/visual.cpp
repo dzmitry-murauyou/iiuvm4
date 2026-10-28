@@ -60,8 +60,6 @@ namespace {
 int g_dpi = 96;
 }
 
-int Dpi() { return g_dpi; }
-
 void SetDpi(int dpi) { g_dpi = (dpi >= 96 && dpi <= 480) ? dpi : 96; }
 
 int S(int dip) { return MulDiv(dip, g_dpi, 96); }
@@ -275,10 +273,10 @@ void View::AddLogLine(const std::wstring& line, int level) {
 int View::MinWidth() const { return S(theme::Pad * 2 + 360 + theme::Gap + theme::PanelW) + S(24); }
 
 int View::MinHeight() const {
-    // Высота карточки «Камера» без необязательных блоков.
-    const int panel = S(42 + 20 + 26 + 10 + 20 + 26 + 12 + 32 + 12 + 1 + 12 + 4 * theme::RowH);
-    // + S(56) — запас, чтобы в карточке «Камера» гарантированно поместились
-    // все четыре строки (режим, формат, кадры, снимки) без наложений.
+    // Высота карточки «Камера»: до разделителя плюс три строки информации.
+    const int panel = S(42 + 20 + 26 + 10 + 20 + 26 + 12 + 32 + 12 + 1 + 12 + 3 * theme::RowH);
+    // + S(56) — запас, чтобы в карточке гарантированно поместились все строки,
+    // «последний снимок» и подсказка без наложений.
     return S(theme::Pad * 2 + theme::HeaderH + theme::Gap + theme::SaveH + theme::Gap +
              theme::LogH) +
            panel + S(56);
@@ -304,6 +302,8 @@ void View::Layout() {
     preview_rc_ = {pad, S(theme::HeaderH), panel_rc_.left - gap, save_rc_.top - gap};
 
     tray_rc_ = {w - pad - S(146), S(14), w - pad, S(14) + S(32)};
+    SetWindowPos(h_tray_, nullptr, tray_rc_.left, tray_rc_.top, tray_rc_.right - tray_rc_.left,
+                 tray_rc_.bottom - tray_rc_.top, SWP_NOZORDER);
 
     // --- шапка -------------------------------------------------------------
     title_rc_ = {pad, S(11), w - pad, S(47)};
@@ -359,7 +359,7 @@ void View::Layout() {
         const int last_h = S(6 + 18 + 22);
         const int hint_h = S(4 + 20);
 
-        rows_ = 4;
+        rows_ = 3;
         show_last_ = false;
         show_hint_ = false;
         if (space >= rows_ * row_h + last_h + hint_h) {
@@ -439,6 +439,13 @@ void View::SetEnabled(const Model& model) {
     EnableWindow(h_snapshot_, on ? TRUE : FALSE);
     EnableWindow(h_dir_, TRUE);
     EnableWindow(h_browse_, TRUE);
+
+    // Owner-draw кнопки не перерисовываются сами при смене состояния —
+    // иначе «Снимок» остаётся нарисованным в старом виде.
+    for (HWND button : {h_connect_, h_disconnect_, h_refresh_, h_snapshot_, h_browse_, h_report_,
+                        h_tray_}) {
+        InvalidateRect(button, nullptr, FALSE);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -488,14 +495,11 @@ void View::DrawHeader(Graphics& g, const Model& model) {
           theme::Sub);
 
     const Color state = StateColor(model.camera_state);
-    RECT dot_rc = status_rc;
-    dot_rc.left += S(2);
     const int cy = (status_rc.top + status_rc.bottom) / 2;
     Dot(g, status_rc.left + S(6), cy, S(5), state);
 
     RECT status_text{status_rc.left + S(20), status_rc.top, status_rc.right, status_rc.bottom};
     TextG(g, status, status_text, f_value_, state);
-    (void)dot_rc;
 
     g.ResetClip();
 }
@@ -565,10 +569,10 @@ void View::DrawPanel(Graphics& g, const Model& model) {
 
     // Строки идут сверху вниз и рисуются только те, что поместились.
     int y = info_top_;
-    const std::wstring values[] = {model.mode, model.format, model.frames,
+    const std::wstring values[] = {model.mode, model.format,
                                    std::to_wstring(model.snapshot_count)};
-    const wchar_t* labels[] = {L"Режим:", L"Формат:", L"Кадров:", L"Снимков:"};
-    for (int i = 0; i < rows_ && i < 4; ++i) {
+    const wchar_t* labels[] = {L"Режим:", L"Формат:", L"Снимков:"};
+    for (int i = 0; i < rows_ && i < 3; ++i) {
         Row(g, panel_rc_, y, labels[i], values[i], f_label_, f_value_);
         y += S(theme::RowH);
     }
@@ -638,9 +642,11 @@ void View::DrawButton(const DRAWITEMSTRUCT* item) {
 
     Color fill = theme::Btn, border = theme::Line, text = theme::Txt;
     if (disabled) {
-        fill = Color(120, 24, 32, 48);
-        border = Color(90, 60, 80, 110);
-        text = theme::Dim;
+        // Отключённая кнопка остаётся читаемой: фон чуть светлее карточки,
+        // текст — светлый серый (контраст ≈ 7:1), а не почти невидимый Dim.
+        fill = Color(255, 26, 33, 48);
+        border = Color(255, 62, 76, 102);
+        text = Color(255, 158, 170, 190);
     } else if (item->CtlID == ID_CONNECT || item->CtlID == ID_SNAPSHOT) {
         fill = pressed ? Color(255, 30, 130, 90) : Color(255, 24, 110, 74);
         border = Color(255, 60, 200, 140);

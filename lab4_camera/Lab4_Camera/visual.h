@@ -57,7 +57,6 @@ struct Model {
     std::wstring status = L"Камера не подключена";
     std::wstring mode;           // «1280 × 720, 30 к/с»
     std::wstring format;         // «MJPG»
-    std::wstring frames;         // счётчик кадров
     std::wstring last_snapshot;  // имя последнего файла
     int snapshot_count = 0;
     bool has_devices = false;
@@ -65,7 +64,6 @@ struct Model {
 };
 
 // --- Масштабирование по DPI -------------------------------------------------
-int Dpi();
 void SetDpi(int dpi);
 int S(int dip);   // «дизайнерские» пиксели -> физические
 
@@ -92,13 +90,11 @@ public:
     HWND ResolutionCombo() const { return h_res_; }
     HWND FpsCombo() const { return h_fps_; }
     HWND DirectoryEdit() const { return h_dir_; }
-    HWND LogList() const { return h_log_; }
 
     void AddLogLine(const std::wstring& line, int level);
 
     HBRUSH FieldBrush() const { return field_brush_; }
     RECT PreviewRect() const { return preview_rc_; }
-    RECT TrayButtonRect() const { return tray_rc_; }
 
     int MinWidth() const;
     int MinHeight() const;
@@ -108,7 +104,6 @@ private:
 
     void CreateControls();
     void ApplyFontsToControls();
-    void UpdateStateColors(const Model& model);
 
     void PaintBackground(Gdiplus::Graphics& g, int w, int h);
     void DrawHeader(Gdiplus::Graphics& g, const Model& model);
@@ -140,14 +135,14 @@ private:
 
     // Геометрия карточек и элементов (в физических пикселях).
     RECT preview_rc_{}, panel_rc_{}, save_rc_{}, log_rc_{}, tray_rc_{};
-    RECT title_rc_{}, subtitle_rc_{}, status_rc_{};
+    RECT title_rc_{}, subtitle_rc_{};
     RECT camera_label_{}, res_label_{}, fps_label_{};
     RECT dir_label_{}, dir_edit_rc_{};
     RECT last_title_rc_{}, last_value_rc_{}, hint_rc_{};
     RECT panel_head_{}, preview_head_{}, save_head_{}, log_head_{};
     int separator_y_ = 0;
     int info_top_ = 0;
-    int rows_ = 4;            // сколько строк «подпись — значение» помещается
+    int rows_ = 3;            // сколько строк «подпись — значение» помещается
     bool show_last_ = true;   // хватает ли места на «последний снимок»
     bool show_hint_ = true;   // хватает ли места на подсказку по клавишам
 };
