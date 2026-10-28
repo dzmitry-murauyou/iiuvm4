@@ -815,7 +815,7 @@ private:
         SendMessageW(h_camera_, CB_SETITEMHEIGHT, (WPARAM)-1, S(24));
         SendMessageW(h_res_, CB_SETITEMHEIGHT, (WPARAM)-1, S(24));
         SendMessageW(h_fps_, CB_SETITEMHEIGHT, (WPARAM)-1, S(24));
-        SendMessageW(h_log_, LB_SETITEMHEIGHT, 0, S(20));
+        SendMessageW(h_log_, LB_SETITEMHEIGHT, 0, S(22));
     }
 
     HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int id, DWORD ex = 0) {
@@ -970,10 +970,15 @@ private:
     }
 
     void DrawHeader(Graphics& g) {
-        RECT title_rc{S(ui::Pad), S(16), tray_rc_.left - S(24), S(52)};
+        // Блок состояния стоит справа, у кнопки «Свернуть в трей».
+        const int status_right = tray_rc_.left - S(24);
+        const int status_left = status_right - S(380);
+        const int text_right = status_left - S(16);
+
+        RECT title_rc{S(ui::Pad), S(14), text_right, S(50)};
         TextG(g, kTitle, title_rc, f_title_, ui::Txt);
 
-        RECT sub_rc{S(ui::Pad), S(52), tray_rc_.left - S(24), S(76)};
+        RECT sub_rc{S(ui::Pad), S(52), text_right, S(76)};
         TextG(g, L"ЛР №4 · вариант А5 · скрытый режим фотонаблюдения", sub_rc, f_label_, ui::Sub);
 
         Color state_color = ui::Dim;
@@ -981,11 +986,9 @@ private:
         else if (camera_.State() == CamState::Opening) state_color = ui::Warn;
         else if (camera_.State() == CamState::Failed) state_color = ui::Bad;
 
-        const int right = tray_rc_.left - S(24);
-        const int cy = S(40);
-        RECT status_rc{right - S(400), S(28), right, S(52)};
-        Dot(g, status_rc.left + S(5), cy, S(5), state_color);
-        RECT text_rc{status_rc.left + S(18), S(28), right, S(52)};
+        RECT status_rc{status_left, S(26), status_right, S(50)};
+        Dot(g, status_rc.left + S(5), (status_rc.top + status_rc.bottom) / 2, S(5), state_color);
+        RECT text_rc{status_rc.left + S(18), S(26), status_right, S(50)};
         TextG(g, status_text_, text_rc, f_value_, state_color);
     }
 
