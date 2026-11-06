@@ -261,6 +261,11 @@ enum class CamState { Off, Opening, On, Failed };
 // GUI только копирует последний кадр — интерфейс не ждёт чтения с камеры.
 class Camera {
 public:
+    // Состояние записи: файл открывается в потоке захвата, поэтому «начали» —
+    // ещё не «пишем». RecordFailed выставляется, если VideoWriter не открылся
+    // (нет кодека, неподдерживаемый размер кадра, путь недоступен).
+    enum RecordState { RecordOff = 0, RecordPending = 1, RecordOn = 2, RecordFailed = 3 };
+
     Camera() = default;
     ~Camera() { Stop(); }
 
@@ -282,7 +287,7 @@ public:
         running_.store(false);
         if (worker_.joinable()) worker_.join();
         if (writer_.isOpened()) writer_.release();
-        recording_.store(false);
+        record_state_.store(RecordOff);
         state_ = CamState::Off;
         std::lock_guard<std::mutex> lock(mutex_);
         latest_ = Frame{};
@@ -303,16 +308,17 @@ public:
         record_fps_ = fps > 1.0 ? fps : 25.0;
         record_start_.store(true);
         record_stop_.store(false);
+        record_state_.store(RecordPending);
         return true;
     }
 
     void StopRecording() {
         std::lock_guard<std::mutex> lock(record_mutex_);
         record_stop_.store(true);
-        recording_.store(false);   // интерфейс обновляется сразу, файл закроет поток
+        record_state_.store(RecordOff);
     }
 
-    bool Recording() const { return recording_.load(); }
+    int RecordStateValue() const { return record_state_.load(); }
 
     // Ждёт кадр до timeout_ms. Нужно, чтобы снимок сразу после «Подключить»
     // не падал с ошибкой «нет видеосигнала», пока камера ещё разгоняется.
@@ -437,17 +443,24 @@ private:
                     path = record_path_;
                     fps = record_fps_;
                 }
-                if (stop && writer_.isOpened()) {
-                    writer_.release();
-                    recording_.store(false);
+                if (stop) {
+                    if (writer_.isOpened()) writer_.release();
+                    record_state_.store(RecordOff);
                 }
                 if (start) {
                     if (writer_.isOpened()) writer_.release();
-                    writer_.open(ToUtf8(path), cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps,
-                                 cv::Size(frame.cols, frame.rows));
-                    recording_.store(writer_.isOpened());
+                    const int fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+                    const cv::Size size(frame.cols, frame.rows);
+                    // Путь с кириллицей OpenCV понимает не всегда: пробуем UTF-8,
+                    // затем системную ANSI-кодировку (как в ImwriteAny).
+                    bool ok = writer_.open(ToUtf8(path), fourcc, fps, size);
+                    if (!ok) {
+                        writer_.release();
+                        ok = writer_.open(ToAnsi(path), fourcc, fps, size);
+                    }
+                    record_state_.store((ok && writer_.isOpened()) ? RecordOn : RecordFailed);
                 }
-                if (writer_.isOpened()) writer_.write(frame);
+                if (record_state_.load() == RecordOn && writer_.isOpened()) writer_.write(frame);
             }
 
             ++fps_frames;
@@ -488,7 +501,7 @@ private:
     double record_fps_ = 25.0;
     std::atomic<bool> record_start_{false};
     std::atomic<bool> record_stop_{false};
-    std::atomic<bool> recording_{false};
+    std::atomic<int> record_state_{RecordOff};
     cv::VideoWriter writer_;   // трогает только поток захвата
 
     mutable std::mutex mutex_;
@@ -948,6 +961,8 @@ private:
             Notify(L"Запись не начата: камера не подключена", 1);
             return;
         }
+        if (camera_.RecordStateValue() != Camera::RecordOff) return;   // уже идёт
+
         ApplyDirectory();
         const std::wstring path = VideoPath(save_dir_);
         if (!camera_.StartRecording(path, kRecordFps)) {
@@ -955,20 +970,44 @@ private:
             return;
         }
         last_video_ = FileName(path);
-        model_.recording = true;
-        view_.SetEnabled(model_);
-        Notify(L"Запись начата: " + last_video_, 3);
+        SyncRecording();   // покажет «открываю файл», результат — по готовности
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
     void StopRecording() {
         camera_.StopRecording();
-        model_.recording = false;
-        view_.SetEnabled(model_);
-        Notify(last_video_.empty() ? L"Запись остановлена"
-                                   : L"Запись остановлена: " + last_video_,
-               0);
+        SyncRecording();
         InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // Файл открывается в потоке захвата, поэтому результат сообщаем здесь:
+    // «начата» — только когда VideoWriter реально открылся, иначе — ошибка.
+    void SyncRecording() {
+        const int state = camera_.RecordStateValue();
+        if (state == record_state_seen_) return;
+        record_state_seen_ = state;
+
+        switch (state) {
+            case Camera::RecordOn:
+                AddLog(0, L"Запись начата: " + last_video_);
+                Notify(L"Запись начата: " + last_video_, 3);
+                break;
+            case Camera::RecordFailed:
+                AddLog(2, L"Не удалось начать запись: " + last_video_);
+                Notify(L"Не удалось начать запись: " + last_video_, 2);
+                break;
+            case Camera::RecordOff:
+                if (model_.recording) {
+                    AddLog(0, L"Запись остановлена: " + last_video_);
+                    Notify(L"Запись остановлена: " + last_video_, 0);
+                }
+                break;
+            default:
+                break;
+        }
+
+        model_.recording = (state == Camera::RecordOn);
+        view_.SetEnabled(model_);
     }
 
     // -----------------------------------------------------------------------
@@ -1011,6 +1050,7 @@ private:
 
     // Снимок по резервной комбинации Ctrl+Shift+F12.
     void OnHotkey() {
+        if (hidden_) AddLog(0, L"Горячая клавиша Ctrl+Shift+F12 — снимок в фоне");
         TakeSnapshot(true);
     }
 
@@ -1022,6 +1062,7 @@ private:
 
         if (both && !chord_down_) {
             chord_down_ = true;
+            if (hidden_) AddLog(0, L"Горячая клавиша «-» + «=» — снимок в фоне");
             TakeSnapshot(true);
         } else if (!both) {
             chord_down_ = false;
@@ -1149,6 +1190,7 @@ private:
             model_.format.clear();
         }
 
+        SyncRecording();
         UpdateModel();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1160,7 +1202,7 @@ private:
         model_.status = status_text_;
         model_.snapshot_count = snapshot_count_;
         model_.last_snapshot = last_snapshot_;
-        model_.recording = camera_.Recording();
+        model_.recording = (camera_.RecordStateValue() == Camera::RecordOn);
         view_.SetEnabled(model_);
     }
 
@@ -1229,6 +1271,7 @@ private:
     bool alt_hotkey_ok_ = false;
     bool chord_down_ = false;
     bool has_frame_ = false;   // последний кадр можно показывать
+    int record_state_seen_ = Camera::RecordOff;   // для уведомлений о записи
     bool hidden_ = false;
 };
 
